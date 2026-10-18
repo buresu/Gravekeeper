@@ -1,0 +1,79 @@
+name: Release
+
+# Builds installers on each OS. Pushing a tag like `v0.2.0` also publishes them as a
+# GitHub release; running the workflow by hand only uploads them as build artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PACKAGER_VERSION: 0.11.8
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported Ubuntu keeps the glibc requirement low for .deb and AppImage.
+          - name: linux
+            os: ubuntu-22.04
+            formats: deb,appimage
+          - name: windows
+            os: windows-latest
+            formats: nsis
+          - name: macos
+            os: macos-latest
+            formats: dmg
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libfontconfig1-dev libfuse2
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked --version ${{ env.CARGO_PACKAGER_VERSION }}
+      - name: Build installers
+        run: cargo packager -p gravekeeper --release --formats ${{ matrix.formats }}
+        env:
+          # linuxdeploy (AppImage) runs without FUSE on CI.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          # Code signing is configured through secrets when available (docs/distribution.md):
+          # Windows: certificate in the store + windows.certificate-thumbprint, or sign-command.
+          # macOS: APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+          #        APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID for notarization.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gravekeeper-${{ matrix.name }}
+          path: |
+            target/packages/*.deb
+            target/packages/*.AppImage
+            target/packages/*-setup.exe
+            target/packages/*.dmg
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+      - name: Checksums
+        run: cd packages && sha256sum * > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: packages/*
+          draft: true
+          generate_release_notes: true

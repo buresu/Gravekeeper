@@ -15,15 +15,25 @@ serde.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter", "ansi"] }
 tray-icon.workspace = true
+# Only for waiting on signals in headless mode.
+tokio = { workspace = true, features = ["rt", "signal", "macros"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-registry.workspace = true
 
 [dev-dependencies]
+png = "0.18"
+tempfile.workspace = true
 toml.workspace = true
+
+[build-dependencies]
+embed-resource = "3"
 
 [features]
 default = ["glow", "http"]
@@ -35,3 +45,36 @@ wgpu = ["eframe/wgpu"]
 
 [lints]
 workspace = true
+
+# Installers, built with cargo-packager (see docs/distribution.md):
+#   cargo packager -p gravekeeper --release --formats deb,appimage
+[package.metadata.packager]
+product-name = "Gravekeeper"
+identifier = "com.gravekeeper.app"
+description = "Supervise and operate applications"
+long-description = "Starts, stops and restarts applications, captures their output, runs schedules, monitors resources and sends webhook notifications."
+category = "Utility"
+license-file = "../../LICENSE"
+before-packaging-command = "cargo build --release -p gravekeeper"
+out-dir = "../../target/packages"
+icons = [
+    "../../packaging/icons/32x32.png",
+    "../../packaging/icons/128x128.png",
+    "../../packaging/icons/256x256.png",
+    "../../packaging/icons/512x512.png",
+    "../../packaging/icons/gravekeeper.ico",
+    "../../packaging/icons/gravekeeper.icns",
+]
+
+[package.metadata.packager.deb]
+desktop-template = "../../packaging/linux/gravekeeper.desktop.hbs"
+section = "utils"
+# Loaded at runtime: xkbcommon and EGL by winit/glow, fontconfig for system fonts.
+depends = ["libc6", "libgcc-s1", "libxkbcommon0", "libfontconfig1", "libegl1"]
+
+[package.metadata.packager.nsis]
+installer-mode = "currentUser"
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"
+

@@ -42,7 +42,7 @@ pub fn create(shell: &Arc<Shell>) -> Result<TrayIcon, Box<dyn std::error::Error>
     let menu = Menu::new();
     menu.append_items(&[&show, &PredefinedMenuItem::separator(), &quit])?;
 
-    let icon = tray_icon::Icon::from_rgba(icon_rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE)
+    let icon = tray_icon::Icon::from_rgba(crate::icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE)
         .expect("generated icon has a valid size");
 
     let tray = TrayIconBuilder::new()
@@ -73,32 +73,4 @@ pub fn create(shell: &Arc<Shell>) -> Result<TrayIcon, Box<dyn std::error::Error>
     }));
 
     Ok(tray)
-}
-
-/// A simple tombstone glyph, generated so no image decoder or asset file is needed.
-pub fn icon_rgba(size: u32) -> Vec<u8> {
-    let s = size as f32;
-    let (cx, top, bottom, half_w) = (s / 2.0, s * 0.12, s * 0.9, s * 0.32);
-    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            let arch_y = top + half_w;
-            let inside = py <= bottom
-                && if py < arch_y {
-                    (px - cx).powi(2) + (py - arch_y).powi(2) <= half_w.powi(2)
-                } else {
-                    (px - cx).abs() <= half_w
-                };
-            let cross = ((px - cx).abs() < s * 0.05 && py > s * 0.3 && py < s * 0.65)
-                || ((py - s * 0.42).abs() < s * 0.05 && (px - cx).abs() < s * 0.15);
-            let pixel = match (inside, cross) {
-                (true, true) => [0x2b, 0x2f, 0x36, 0xff],
-                (true, false) => [0x9a, 0xa5, 0xb1, 0xff],
-                _ => [0, 0, 0, 0],
-            };
-            rgba.extend_from_slice(&pixel);
-        }
-    }
-    rgba
 }

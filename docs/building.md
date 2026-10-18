@@ -18,6 +18,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo build --release -p gravekeeper     # target/release/gravekeeper
 cargo deny check                         # licenses, advisories, sources (cargo install cargo-deny)
+cargo run -p gravekeeper -- --headless   # supervisor without a GUI (Ctrl-C to stop)
+cargo run -p gravekeeper --example gen_icons   # regenerate packaging/icons
+cargo packager -p gravekeeper --release --formats deb,appimage   # installers (see distribution.md)
 ```
 
 ### Renderer
@@ -57,6 +60,7 @@ LIBSQLITE3_SYS_USE_PKG_CONFIG=1 SQLITE3_LIB_DIR=/nonexistent \
 | Unit | `#[cfg(test)]` in each module | Config parsing/validation/saving/migration, restart policy, schedule planning (DST, missed runs), thresholds, webhook filters and payloads, log rotation, history store, line splitting, exit classification, editors, autostart entry, formatting |
 | Process | `crates/gravekeeper-core/tests/process.rs` | Real processes: output capture, heavy output, stopping, stopping descendants, escalation to kill |
 | Operations | `crates/gravekeeper-core/tests/operations.rs` | Start order, reordering and backups, schedule runs (success, failure, time limit), interval schedules, missed-run catch-up across restarts, webhooks against a local HTTP server (retry, failure without URL, test message), log files, monitoring alerts and recovery |
+| Headless | `crates/gravekeeper/tests/headless.rs` | The real binary: SIGTERM stops applications and exits cleanly, SIGHUP reloads, a second instance exits with code 3, children die with a SIGKILLed supervisor (Linux), CLI errors |
 | Engine | `crates/gravekeeper-core/tests/engine.rs` | The whole engine with real processes: autostart and delay, crash loop and give-up, on-failure policy, failed starts, pause, restart, output, spawn failure, editing/removing, broken config, single instance, history across restarts, shutdown |
 
 Integration tests use `gk-test-helper` (`crates/gravekeeper-core/src/bin/`) instead of shell commands, so the same tests run on every OS. The helper is not part of the product.

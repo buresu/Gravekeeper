@@ -128,6 +128,8 @@ impl ManagedChild {
             if let Some(cwd) = &spec.cwd {
                 cmd.current_dir(cwd);
             }
+            #[cfg(target_os = "linux")]
+            terminate_with_parent(cmd);
         });
         #[cfg(unix)]
         command.wrap(process_wrap::tokio::ProcessGroup::leader());
@@ -239,6 +241,32 @@ impl ManagedChild {
             }
         };
         tokio::time::timeout(timeout, all).await.is_ok()
+    }
+}
+
+/// Asks the kernel to send SIGTERM to the child when Gravekeeper dies, even if it is killed
+/// (SIGKILL, crash), so supervised processes do not outlive their supervisor. Only the direct
+/// child gets the signal; well-behaved programs pass it on to their own children.
+///
+/// The death signal is tied to the thread that spawned the child; children are spawned on the
+/// engine thread, which lives until the engine has stopped them anyway.
+#[cfg(target_os = "linux")]
+fn terminate_with_parent(cmd: &mut tokio::process::Command) {
+    // SAFETY: getpid is always safe.
+    let parent = unsafe { libc::getpid() };
+    // SAFETY: the closure runs between fork and exec and only makes async-signal-safe calls
+    // (prctl, getppid), without allocating.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            // The parent may have died before prctl took effect.
+            if libc::getppid() != parent {
+                return Err(io::Error::other("supervisor exited during spawn"));
+            }
+            Ok(())
+        });
     }
 }
 

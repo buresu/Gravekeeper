@@ -245,7 +245,7 @@ impl eframe::App for AlreadyRunning {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("Gravekeeper is already running");
-            ui.label("Open it from its icon in the system tray.");
+            ui.label("Open it from its icon in the system tray. If it runs as a background service (gravekeeper service status), stop the service to use the window.");
             ui.add_space(8.0);
             if ui.button("OK").clicked() {
                 ui.send_viewport_cmd(ViewportCommand::Close);

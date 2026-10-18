@@ -166,7 +166,9 @@ fn run(
         let disks: Vec<DiskUsage> = disks
             .list()
             .iter()
-            .filter(|d| d.total_space() > 0 && !d.is_removable())
+            // Read-only mounts (e.g. an AppImage's own squashfs) are always "full" and
+            // cannot fill up further, so they would only raise false alerts.
+            .filter(|d| d.total_space() > 0 && !d.is_removable() && !d.is_read_only())
             .filter_map(|d| {
                 let mount = d.mount_point().to_string_lossy().into_owned();
                 let shown = interesting_mount(&mount, &d.file_system().to_string_lossy());
@@ -212,6 +214,10 @@ fn interesting_mount(mount: &str, fs: &str) -> bool {
         "squashfs", "overlay", "tmpfs", "devtmpfs", "ramfs", "efivarfs",
     ];
     if PSEUDO.contains(&fs) {
+        return false;
+    }
+    // AppImages mount themselves here (FUSE squashfs).
+    if mount.starts_with("/tmp/.mount_") {
         return false;
     }
     // macOS lists the sealed system volume's helpers; only the data volume matters.
@@ -356,6 +362,10 @@ mod tests {
     fn pseudo_file_systems_are_hidden() {
         assert!(interesting_mount("/", "ext4"));
         assert!(!interesting_mount("/snap/core/1", "squashfs"));
+        assert!(!interesting_mount(
+            "/tmp/.mount_gravekXYZ",
+            "fuse.gravekeeper.AppImage"
+        ));
         assert!(!interesting_mount("/System/Volumes/VM", "apfs"));
         assert!(interesting_mount("/System/Volumes/Data", "apfs"));
     }

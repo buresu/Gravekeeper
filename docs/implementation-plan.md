@@ -26,6 +26,8 @@ This document tracks what is done, what is not, and known issues for each phase.
 | Webhooks | reqwest (rustls + OS certificate store), serde_json | HTTP client integrated with the engine's Tokio runtime; no OpenSSL |
 | Metrics | sysinfo | CPU, memory, disks, per-process usage and boot time on all three OSes |
 | Login items | windows-registry (Windows), zbus (Linux, already pulled in by ksni) | Run key on Windows; tray host detection on Linux |
+| Packaging | cargo-packager (tool), embed-resource, png (icon generator only) | Installers for all OSes from one config; Windows exe icon |
+| Headless | tokio `signal` | SIGTERM / SIGHUP handling in headless mode |
 | Planned | interprocess | Local IPC (Phase 4) |
 
 ## Phase 0: Technology check — done
@@ -91,12 +93,30 @@ See [phase0-report.md](phase0-report.md) for details.
 - **Binary size grew from 12.0 MB (Phase 0) to 22.9 MB** (Linux release, glow), mostly TLS (rustls with aws-lc), the HTTP client and SQLite. Acceptable for a desktop tool; revisit (e.g. a smaller HTTP client or the `ring` provider) if distribution size matters.
 - **HTTP is a Cargo feature (`http`, on by default)** only so that other targets can be type-checked from Linux without a C cross-compiler for TLS.
 
-## Phase 3: OS integration and distribution
+## Phase 3: OS integration and distribution — done (except items marked below)
 
-- Finish per-OS autostart, OS service registration (`ServiceManager`, a separate responsibility from `AutostartManager`)
-- Installers (MSI / dmg / AppImage; Flatpak and others to be evaluated)
-- Install a `.desktop` file and icon on Linux (on Wayland the window icon comes from the `.desktop` matching the `app_id`)
-- Update mechanism, code signing, testing on real Wayland / X11 / macOS / Windows machines
+- [x] **Command line**: `--minimized`, `--headless`, `service install|uninstall|status`, `--help`, `--version`
+- [x] **Headless mode**: the supervisor without a GUI; graceful stop on SIGTERM/SIGINT/Ctrl-C, reload on SIGHUP
+- [x] **User service** (`ServiceManager`): systemd user unit (with reload) on Linux, LaunchAgent on macOS
+- [x] **Children stopped if Gravekeeper is killed** on Linux (`PR_SET_PDEATHSIG`)
+- [x] **Icon** drawn in code with anti-aliasing; generated PNG / ICO / ICNS; `.desktop` entry with `StartupWMClass`; icon embedded in the Windows executable
+- [x] **Installers** with cargo-packager: `.deb` and AppImage (built and run on Linux), NSIS and dmg (CI); user-local `install.sh`; release workflow with checksums and draft releases
+- [x] **Update and code signing design** ([distribution.md](distribution.md))
+- [x] AppImage mounts and other read-only file systems are no longer monitored (they caused false disk alerts)
+- [ ] Windows service (session 0, service control handler) — with the separate supervisor process
+- [ ] Graceful stop and exit detection on Windows (from Phase 1)
+- [ ] macOS: stopping children when Gravekeeper is killed; adopting orphans after a restart
+- [ ] Code signing (needs certificates) and the update check (needs a release location)
+- [ ] Real-machine tests on Windows and macOS, X11-only and GNOME desktops
+
+### Decisions made in Phase 3
+
+- **Services are per user, not system-wide.** Applications usually belong to a user and need their environment; a system service would need privilege separation and access control first (Phase 4).
+- **Service and GUI exclude each other** through the existing lock rather than one silently taking over. The GUI attaching to a running service needs IPC (Phase 4).
+- **cargo-packager** builds all formats from one configuration in `Cargo.toml`, is MIT/Apache licensed, and comes with a signed updater for later.
+- **Linux packages target Ubuntu 22.04's glibc** in CI so the `.deb` and AppImage run on older distributions too.
+- **Releases are drafts** until published by hand.
+- **Icons are generated, not drawn by hand**, from the same code as the window icon, and committed so packaging needs no extra tool.
 
 ## Phase 4: Extensions
 

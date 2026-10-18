@@ -3,7 +3,7 @@
 ## Overview
 
 ```
-gravekeeper (bin: eframe GUI, tray, autostart, main)
+gravekeeper (bin: CLI → GUI | --headless | service install/uninstall/status)
     │  CoreHandle::send(Command) / snapshot() -> Arc<Snapshot>
     │            logs_since(app, seq) / schedule_logs_since(schedule, seq)
     ▼
@@ -45,6 +45,18 @@ gravekeeper-core (lib: no GUI dependency)
 
 Neither the GUI thread nor the engine thread ever waits on disk, the network or a child process. Tasks and threads report back to the engine through one `Internal` message channel (process exits, schedule runs, webhook outcomes) and a sample channel.
 
+## Modes
+
+`main.rs` parses the command line (`cli.rs`) and runs one of:
+
+| Mode | Module | What runs |
+|---|---|---|
+| `gravekeeper [--minimized]` | `gui.rs` | Engine + window + tray in one process |
+| `gravekeeper --headless` | `headless.rs` | Engine only; SIGTERM / SIGINT / Ctrl-C stop it gracefully, SIGHUP reloads the configuration |
+| `gravekeeper service …` | `service.rs` | Registers the headless mode as a user service (systemd user unit, LaunchAgent) |
+
+Both running modes take the same lock, so only one supervises. Logging goes to stderr and `logs/gravekeeper.log` in both. See [distribution.md](distribution.md) for packaging and services.
+
 ## Startup
 
 1. `Paths::from_env()` picks the config file and data directory.
@@ -83,6 +95,7 @@ Paused (a flag, not a state): exits are recorded but never restarted.
   - A run of at least `stable_after` clears the failure history. More than `max_restarts` failures within `window` → `GaveUp`.
   - A manual start resets the history.
 - **Leftover descendants**: when the main process exits on its own, whatever remains of its process group / Job Object is killed. Applications that daemonize (fork and exit) are therefore not supported; run them in foreground mode.
+- **If Gravekeeper itself dies** (killed, crashed): on Linux every child is spawned with `PR_SET_PDEATHSIG = SIGTERM`, so the kernel stops the supervised processes; on Windows the Job Objects close with the process and kill their trees. On macOS the processes keep running (no equivalent mechanism; planned together with adopting orphans after a restart).
 - **Shutdown**: quitting stops every running application (in parallel, each with its `stop_timeout`) before the engine exits. As a last resort, dropping the engine kills remaining process trees (`KillOnDrop`).
 
 ## Configuration changes

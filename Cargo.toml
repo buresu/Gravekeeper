@@ -14,6 +14,7 @@ gravekeeper-core = { path = "crates/gravekeeper-core", default-features = false 
 
 eframe = { version = "0.37", default-features = false }
 jiff = { version = "0.2", features = ["serde"] }
+libc = "0.2"
 process-wrap = { version = "10", default-features = false }
 # rustls with the OS certificate store; no OpenSSL needed.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
