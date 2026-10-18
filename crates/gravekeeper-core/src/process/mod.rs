@@ -132,7 +132,14 @@ impl ManagedChild {
         #[cfg(unix)]
         command.wrap(process_wrap::tokio::ProcessGroup::leader());
         #[cfg(windows)]
-        command.wrap(process_wrap::tokio::JobObject);
+        {
+            command.wrap(process_wrap::tokio::JobObject);
+            // Gravekeeper has no console, so each console child would otherwise open its own
+            // console window. Output is captured through pipes regardless.
+            command.wrap(process_wrap::tokio::CreationFlags(
+                windows::Win32::System::Threading::CREATE_NO_WINDOW,
+            ));
+        }
         command.wrap(KillOnDrop);
 
         let mut child = command.spawn()?;
@@ -214,6 +221,12 @@ impl ManagedChild {
             exit: self.wait().await?,
             forced: true,
         })
+    }
+
+    /// Kills whatever is left of the process tree after the main process exited on its own
+    /// (descendants that kept running). Best effort; does nothing if the tree is gone.
+    pub fn kill_remaining(&mut self) {
+        let _ = self.child.start_kill();
     }
 
     /// Waits until both output streams reach EOF, or `timeout` passes. EOF can be delayed

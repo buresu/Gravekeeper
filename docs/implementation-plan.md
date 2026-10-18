@@ -20,7 +20,11 @@ This document tracks what is done, what is not, and known issues for each phase.
 | Async | tokio 1 | Process waiting, timers, HTTP. Used only inside the engine |
 | Serialization | serde | Config files and future IPC |
 | Logging | tracing / tracing-subscriber | Structured logs |
-| Planned | toml, rusqlite (bundled), reqwest (rustls), sysinfo, jiff, directories, interprocess | Introduced in the phase that needs them |
+| Config | toml | TOML is the planned format. Per-OS locations are computed with the standard library (`directories` was dropped: it pulls in an MPL-2.0 crate for a few lines of path logic) |
+| History | rusqlite (`bundled`) | SQLite built in, so no system library is needed on any OS |
+| Time display | jiff | Local time zone conversion for event timestamps; also used by the Phase 2 scheduler |
+| Login items | windows-registry (Windows), zbus (Linux, already pulled in by ksni) | Run key on Windows; tray host detection on Linux |
+| Planned | reqwest (rustls), sysinfo, interprocess | Introduced in the phase that needs them |
 
 ## Phase 0: Technology check — done
 
@@ -34,29 +38,31 @@ See [phase0-report.md](phase0-report.md) for details.
 - [x] Startup time, memory and binary size measurements
 - [ ] Testing on real Windows / macOS machines (CI only builds and tests)
 
-## Phase 1: MVP
+## Phase 1: MVP — done (except items marked below)
 
-Implemented in small steps, each with tests.
+- [x] **config**: `AppSpec` (id, name, program, arguments, working directory, environment, enabled, autostart, start delay, startup grace, stop timeout, restart policy) in TOML with `schema_version`, validation, unknown-key rejection, atomic save with `.bak`, private permissions on Unix ([configuration.md](configuration.md))
+- [x] **Single instance**: exclusive lock file in the data directory (`File::try_lock`, all OSes); a second launch shows a notice and exits
+- [x] **supervisor**: state machine (Stopped / Waiting / Starting / Running / Stopping / Backoff / GaveUp / Disabled, plus Paused), restart policy with exponential backoff, jitter, give-up limit and stability reset; exit reasons that distinguish requested stops from failures
+- [x] **store**: SQLite event history (bundled), migrations, batching writer thread, retention limit; the app keeps working without it
+- [x] **API**: `Command` (Start / Stop / Restart / SetPaused / SaveApp / RemoveApp / SaveGeneral / ReloadConfig / Shutdown), `Snapshot` with per-app `AppStatus` and recent events, `logs_since`
+- [x] **GUI**: dashboard, application list, details and controls, editor form, output viewer (stdout / stderr / lifecycle notes, filter), event history with filters, settings, config-error banner, quit confirmation
+- [x] **Window state**: size and the selected tab/application persist (eframe `persistence`); start-minimized setting and `--minimized`
+- [x] **Launch at login** (`AutostartManager`): XDG autostart `.desktop` / LaunchAgent plist / HKCU Run value
+- [x] Tray host detection on Linux (falls back to closing = quit)
+- [x] Leftover descendants are killed when the main process exits on its own
+- [ ] Graceful stop on Windows (CTRL_BREAK for console apps, WM_CLOSE for GUI apps) — needs a Windows machine to develop and test
+- [ ] On Windows, `wait()` returns only when every process in the Job has exited, so an exit of the main process alone is not noticed while descendants run
+- [ ] Orphans when Gravekeeper itself is killed (Unix: the supervised processes keep running; Windows: the Job Object kills them). Options: adopt them on restart via a PID file, or `PR_SET_PDEATHSIG` on Linux
+- [ ] Manual check of the editor form and launch-at-login toggle in a real session (input could not be automated on KWin Wayland)
 
-1. **config**: `AppSpec` (ID, name, executable, arguments, working directory, environment, delay, autostart, restart policy, timeouts)
-   - TOML, `schema_version`, validation, atomic save (temp file + rename) and a `.bak`
-   - Location chosen with the `directories` crate; permissions 0600 / 0700 on Unix
-2. **Single instance**: a lock file (flock) on Unix, a named mutex on Windows. A second launch brings the existing window to the front (notification only until the Phase 4 IPC exists)
-3. **supervisor**: state machine and restart policy, with an injectable clock for deterministic tests
-   - Exit reasons: `UserStop | StopTimeoutKilled | Exited(code) | Signaled(sig) | SpawnFailed | StartTimeout`
-4. **store**: SQLite (rusqlite, bundled) event history and migrations. If the DB cannot be opened, the app still starts and runs without history
-5. **API extension**: `Command` (Start / Stop / Restart / Pause / Enable / UpsertApp / RemoveApp), per-app state in `Snapshot`, `Event` subscription
-6. **GUI**: app list, detail and edit form, log viewer (incremental fetch via `LogBuffer::since`), event history, general settings
-7. **Window state save/restore** (eframe `persistence` feature) and a start-minimized setting
-8. **Launch at login** (`AutostartManager`): HKCU\…\Run on Windows, a LaunchAgent plist on macOS, an XDG autostart `.desktop` on Linux
+### Decisions made in Phase 1
 
-Issues found in Phase 0 that Phase 1 resolves:
-
-- Graceful stop on Windows (CTRL_BREAK for console apps, WM_CLOSE for GUI apps)
-- On Windows, `wait()` does not return until every process in the Job has exited. Design a way to detect the parent's exit first
-- What to do when only the parent exits and descendants remain; decide whether to terminate the whole process group by default
-- Orphaned processes when Gravekeeper itself crashes (they keep running on Unix): adopt them or terminate them after restart
-- Detect environments without a tray host (GNOME without the extension) by checking for `org.kde.StatusNotifierWatcher`, and fall back to `Quit`
+- **Durations are whole seconds** in the file and the editor. Sub-second precision has no use for supervision and keeps the file readable.
+- **The startup grace replaces a separate "start timeout"**: a process that exits within `startup_grace` counts as a failed start. A start that "hangs" cannot be detected without a health check, which belongs to Phase 2 monitoring.
+- **A stable run clears the failure history entirely**, so `max_restarts` / `window` only limit crash loops, not rare crashes spread over days.
+- **Edits apply at the next start** rather than restarting a running application implicitly.
+- **The lock file uses the standard library's `File::try_lock`** (Rust 1.89+) on every OS instead of a named mutex on Windows.
+- **Event kinds and levels are stored as text** in SQLite, so the history stays readable with any SQLite tool and survives enum reordering.
 
 ## Phase 2: Operations
 

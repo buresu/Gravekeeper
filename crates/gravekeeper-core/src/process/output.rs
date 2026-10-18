@@ -11,6 +11,8 @@ pub const MAX_LINE_BYTES: usize = 16 * 1024;
 pub enum Stream {
     Stdout,
     Stderr,
+    /// Lifecycle notes written by Gravekeeper itself ("started", "exited", ...).
+    Meta,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

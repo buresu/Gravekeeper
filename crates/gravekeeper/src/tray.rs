@@ -7,11 +7,36 @@ use crate::shell::{Shell, TrayAction};
 
 const ICON_SIZE: u32 = 32;
 
+/// Whether a tray can be shown. On Linux this needs a StatusNotifierItem host (KDE, Xfce, ...;
+/// GNOME only with an extension). Without one the icon would silently not appear.
+pub fn host_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let has_watcher = || -> zbus::Result<bool> {
+            let conn = zbus::blocking::Connection::session()?;
+            let dbus = zbus::blocking::fdo::DBusProxy::new(&conn)?;
+            Ok(dbus.name_has_owner("org.kde.StatusNotifierWatcher".try_into()?)?)
+        };
+        match has_watcher() {
+            Ok(found) => found,
+            Err(err) => {
+                tracing::warn!(%err, "cannot query the session bus for a tray host");
+                false
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    true
+}
+
 /// Creates the tray icon and routes its events to `shell`.
 ///
 /// On Windows and macOS this must run on the main thread while the event loop is running.
 /// On Linux (ksni backend) it can run at any time; the tray lives on its own thread.
 pub fn create(shell: &Arc<Shell>) -> Result<TrayIcon, Box<dyn std::error::Error>> {
+    if !host_available() {
+        return Err("no system tray host is running".into());
+    }
     let show = MenuItem::with_id("show", "Show Gravekeeper", true, None);
     let quit = MenuItem::with_id("quit", "Quit", true, None);
     let menu = Menu::new();

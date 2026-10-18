@@ -4,8 +4,10 @@ A desktop tool for supervising and operating applications on Windows, macOS and 
 start/stop/restart processes, capture their output, detect crashes, restart with back-off,
 run schedules and send webhook notifications. Written in Rust with an [egui] GUI.
 
-> **Status:** Phase 0 (technology check). Nothing is usable yet beyond a window, a system
-> tray icon and the process-control foundation. See [the implementation plan](docs/implementation-plan.md).
+> **Status:** Phase 1 (MVP). Applications can be added, started, stopped and restarted
+> automatically with back-off; output and an event history are shown in the GUI, which lives
+> in the system tray. Linux is tested on real hardware; Windows and macOS are built and tested
+> in CI only. See [the implementation plan](docs/implementation-plan.md).
 
 ## Layout
 
@@ -13,7 +15,7 @@ run schedules and send webhook notifications. Written in Rust with an [egui] GUI
 |---|---|
 | `crates/gravekeeper-core` | Supervisor engine. No GUI dependency; talks to front-ends only through `CoreHandle`. |
 | `crates/gravekeeper` | Desktop application (eframe window, system tray). |
-| `docs/` | Architecture, plan, platform notes, build instructions, phase reports. |
+| `docs/` | [Architecture](docs/architecture.md), [configuration](docs/configuration.md), [plan](docs/implementation-plan.md), [platform notes](docs/platform-support.md), [building](docs/building.md). |
 
 ## Building
 

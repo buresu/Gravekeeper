@@ -5,8 +5,12 @@
 //! separate process behind local IPC without changing the front-end.
 
 pub mod api;
+pub mod config;
 mod engine;
+pub mod paths;
 pub mod process;
+mod store;
+pub mod supervisor;
 
 pub use api::{Command, Snapshot};
-pub use engine::{CoreHandle, Notifier};
+pub use engine::{CoreHandle, Notifier, StartError};

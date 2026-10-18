@@ -8,12 +8,19 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-process-wrap = { workspace = true, features = ["tokio1", "kill-on-drop", "process-group", "job-object"] }
+process-wrap = { workspace = true, features = ["tokio1", "kill-on-drop", "process-group", "job-object", "creation-flags"] }
+rusqlite.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "process", "io-util", "macros"] }
+toml.workspace = true
 tracing.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Same version process-wrap uses; only for the CREATE_NO_WINDOW flag.
+windows.workspace = true
+
 [dev-dependencies]
+tempfile.workspace = true
 sysinfo = { workspace = true, features = ["system"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
 

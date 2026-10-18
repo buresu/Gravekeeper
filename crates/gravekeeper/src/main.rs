@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
 mod shell;
 mod tray;
 mod ui;
@@ -9,7 +10,8 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use eframe::egui;
-use gravekeeper_core::CoreHandle;
+use gravekeeper_core::paths::Paths;
+use gravekeeper_core::{CoreHandle, StartError};
 use tracing_subscriber::EnvFilter;
 use tray_icon::TrayIcon;
 
@@ -58,15 +60,41 @@ fn main() -> ExitCode {
         }
     };
 
+    let paths = match Paths::from_env() {
+        Ok(paths) => paths,
+        Err(err) => {
+            tracing::error!(%err, "cannot determine where to store data");
+            return ExitCode::FAILURE;
+        }
+    };
     let ctx = egui::Context::default();
     let repaint_ctx = ctx.clone();
-    let core = match CoreHandle::start(Arc::new(move || repaint_ctx.request_repaint())) {
+    let core = match CoreHandle::start(paths, Arc::new(move || repaint_ctx.request_repaint())) {
         Ok(core) => core,
+        Err(StartError::AlreadyRunning) => {
+            tracing::warn!("another instance is already running");
+            // No app id: eframe derives its storage location from it, and the main window's
+            // saved size must not be applied here.
+            let _ = eframe::run_native(
+                "Gravekeeper notice",
+                eframe::NativeOptions {
+                    viewport: egui::ViewportBuilder::default()
+                        .with_title("Gravekeeper")
+                        .with_inner_size([380.0, 120.0]),
+                    renderer: renderer(),
+                    persist_window: false,
+                    ..Default::default()
+                },
+                Box::new(|_| Ok(Box::new(ui::AlreadyRunning))),
+            );
+            return ExitCode::from(3);
+        }
         Err(err) => {
             tracing::error!(%err, "failed to start engine");
             return ExitCode::FAILURE;
         }
     };
+    options.start_minimized |= core.snapshot().config.general.start_minimized;
 
     let (wake_tx, wake_rx) = mpsc::channel();
     let shell = Arc::new(Shell::new(ctx, wake_tx));
@@ -78,7 +106,10 @@ fn main() -> ExitCode {
         tray = create_tray(&shell, &mut options);
     }
 
-    let mut show_window = !options.start_minimized || options.close == CloseBehavior::Hide;
+    // Without a tray, a window is the only way to reach the application.
+    let mut show_window = !options.start_minimized
+        || options.close == CloseBehavior::Hide
+        || options.close == CloseBehavior::Quit;
     let result = loop {
         if show_window
             && let Err(err) = run_window(&options, &shell, &core, &mut tray, process_started)
@@ -134,8 +165,8 @@ fn run_window(
         viewport: egui::ViewportBuilder::default()
             .with_title("Gravekeeper")
             .with_app_id(APP_ID)
-            .with_inner_size([720.0, 480.0])
-            .with_min_inner_size([480.0, 320.0])
+            .with_inner_size([960.0, 640.0])
+            .with_min_inner_size([640.0, 400.0])
             .with_icon(icon)
             .with_visible(visible),
         renderer: renderer(),
@@ -162,10 +193,10 @@ fn run_window(
                 }
             }
             Ok(Box::new(ui::GravekeeperApp::new(
+                cc,
                 Arc::clone(shell),
                 core,
                 close,
-                renderer_name(),
                 process_started,
             )))
         }),
@@ -179,12 +210,4 @@ fn renderer() -> eframe::Renderer {
     return eframe::Renderer::Glow;
     #[cfg(not(feature = "glow"))]
     return eframe::Renderer::Wgpu;
-}
-
-fn renderer_name() -> &'static str {
-    if cfg!(feature = "glow") {
-        "glow (OpenGL)"
-    } else {
-        "wgpu"
-    }
 }

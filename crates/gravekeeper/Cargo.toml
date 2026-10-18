@@ -9,10 +9,18 @@ publish.workspace = true
 
 [dependencies]
 gravekeeper-core.workspace = true
-eframe = { workspace = true, features = ["default_fonts", "system_fonts", "wayland", "x11"] }
+eframe = { workspace = true, features = ["default_fonts", "system_fonts", "wayland", "x11", "persistence"] }
+jiff.workspace = true
+serde.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter", "ansi"] }
 tray-icon.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-registry.workspace = true
 
 [features]
 default = ["glow"]
