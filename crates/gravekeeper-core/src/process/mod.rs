@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::BufReader;
 use tokio::task::JoinHandle;
 
-pub use output::{LogBuffer, LogLine, MAX_LINE_BYTES, Stream};
+pub use output::{FileSink, LogBuffer, LogLine, MAX_LINE_BYTES, Stream};
 
 /// What to run. Arguments are passed directly to the program; no shell is involved.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

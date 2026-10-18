@@ -30,15 +30,16 @@ cargo run -p gravekeeper --no-default-features --features wgpu
 
 ### Checking other platforms from Linux
 
-The Windows and macOS code paths can be type-checked without those machines. The bundled SQLite needs a C cross-compiler, so point `libsqlite3-sys` at a (non-existent) system library instead; nothing is linked by `check`/`clippy`:
+The Windows and macOS code paths can be type-checked without those machines. Two dependencies compile C code for the target: the bundled SQLite (point `libsqlite3-sys` at a non-existent system library instead; nothing is linked by `check`/`clippy`) and TLS for webhooks (turn off the `http` feature):
 
 ```sh
 rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin
 LIBSQLITE3_SYS_USE_PKG_CONFIG=1 SQLITE3_LIB_DIR=/nonexistent \
-  cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
-LIBSQLITE3_SYS_USE_PKG_CONFIG=1 SQLITE3_LIB_DIR=/nonexistent \
-  cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings
+  cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc \
+  --no-default-features --features gravekeeper/glow -- -D warnings
 ```
+
+(Same for `aarch64-apple-darwin`.)
 
 ### Runtime environment variables
 
@@ -53,8 +54,9 @@ LIBSQLITE3_SYS_USE_PKG_CONFIG=1 SQLITE3_LIB_DIR=/nonexistent \
 
 | Kind | Location | Covers |
 |---|---|---|
-| Unit | `#[cfg(test)]` in each module | Config parsing/validation/saving, restart policy, history store, line splitting, ring buffer, exit classification, editor input, autostart entry, formatting |
+| Unit | `#[cfg(test)]` in each module | Config parsing/validation/saving/migration, restart policy, schedule planning (DST, missed runs), thresholds, webhook filters and payloads, log rotation, history store, line splitting, exit classification, editors, autostart entry, formatting |
 | Process | `crates/gravekeeper-core/tests/process.rs` | Real processes: output capture, heavy output, stopping, stopping descendants, escalation to kill |
+| Operations | `crates/gravekeeper-core/tests/operations.rs` | Start order, reordering and backups, schedule runs (success, failure, time limit), interval schedules, missed-run catch-up across restarts, webhooks against a local HTTP server (retry, failure without URL, test message), log files, monitoring alerts and recovery |
 | Engine | `crates/gravekeeper-core/tests/engine.rs` | The whole engine with real processes: autostart and delay, crash loop and give-up, on-failure policy, failed starts, pause, restart, output, spawn failure, editing/removing, broken config, single instance, history across restarts, shutdown |
 
 Integration tests use `gk-test-helper` (`crates/gravekeeper-core/src/bin/`) instead of shell commands, so the same tests run on every OS. The helper is not part of the product.

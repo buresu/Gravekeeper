@@ -22,8 +22,13 @@ zbus.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-registry.workspace = true
 
+[dev-dependencies]
+toml.workspace = true
+
 [features]
-default = ["glow"]
+default = ["glow", "http"]
+# Webhook delivery (see gravekeeper-core). Turn off only to type-check other targets.
+http = ["gravekeeper-core/http"]
 # Renderer backends. Exactly one is used at runtime; glow is preferred when both are enabled.
 glow = ["eframe/glow"]
 wgpu = ["eframe/wgpu"]

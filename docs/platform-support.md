@@ -16,6 +16,11 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 | Single instance | ✅ lock file | ✅ | 🧪 | 🧪 |
 | Tray host detection | ✅ | ✅ | — (always available) | — (always available) |
 | Supervision (start, stop, restart policy, history) | ✅ | ✅ | 🧪 | 🧪 |
+| Schedules (incl. DST, missed runs) | ✅ | ✅ | 🧪 | 🧪 |
+| Webhooks | ✅ | ✅ | 🧪 | 🧪 |
+| CPU / memory / disk monitoring | ✅ | ✅ | 🧪 | 🧪 |
+| Boot time (`boot_delay`, after-boot schedules) | ✅ | ✅ | 🧪 | 🧪 |
+| Log files and rotation | ✅ | ✅ | 🧪 | 🧪 |
 
 ## Limitations and notes
 
@@ -23,6 +28,9 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 
 - **Daemonizing applications** (those that fork and exit) are not supported: when the main process exits, its remaining descendants are killed. Run such programs in foreground mode.
 - **Launch at login** starts the GUI in the user's session. It does not run Gravekeeper before login; that is the OS service feature planned for Phase 3.
+
+- **Sleep**: schedules notice a suspend/resume within 30 seconds of waking up and apply the missed-run policy to runs that were due while asleep.
+- **Disks**: removable drives and pseudo file systems (tmpfs, overlay, squashfs, …) are not monitored.
 
 ### Linux
 
@@ -41,7 +49,10 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 - **If Gravekeeper is killed**: the Job Objects are closed with it and the supervised processes are terminated. (On Unix they keep running.)
 - **Console**: release builds use `windows_subsystem = "windows"`, so no console window appears.
 
+- **Time zones**: jiff uses its bundled time zone database on Windows.
+
 ### macOS
 
 - **Tray**: must be created on the main thread after the event loop starts, so it is created inside eframe's app-creation callback.
 - **Gatekeeper**: signing and notarization of release builds are handled in Phase 3.
+- **Disks**: of the system volume's helper mounts under `/System/Volumes/`, only `/System/Volumes/Data` is monitored.

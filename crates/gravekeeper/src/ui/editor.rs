@@ -18,6 +18,7 @@ pub struct Editor {
     enabled: bool,
     autostart: bool,
     start_delay: u64,
+    boot_delay: u64,
     startup_grace: u64,
     stop_timeout: u64,
     mode: RestartMode,
@@ -64,6 +65,7 @@ impl Editor {
             enabled: spec.enabled,
             autostart: spec.autostart,
             start_delay: spec.start_delay.as_secs(),
+            boot_delay: spec.boot_delay.as_secs(),
             startup_grace: spec.startup_grace.as_secs(),
             stop_timeout: spec.stop_timeout.as_secs(),
             mode: r.mode,
@@ -111,6 +113,7 @@ impl Editor {
         spec.enabled = self.enabled;
         spec.autostart = self.autostart;
         spec.start_delay = secs(self.start_delay);
+        spec.boot_delay = secs(self.boot_delay);
         spec.startup_grace = secs(self.startup_grace);
         spec.stop_timeout = secs(self.stop_timeout);
         spec.restart.mode = self.mode;
@@ -165,6 +168,15 @@ impl Editor {
                 ui.checkbox(&mut self.autostart, "When Gravekeeper starts");
                 ui.end_row();
                 secs_row(ui, "Start delay", &mut self.start_delay);
+                ui.label("Wait for system uptime").on_hover_text(
+                    "Do not start automatically before the computer has been up this long",
+                );
+                ui.add(
+                    egui::DragValue::new(&mut self.boot_delay)
+                        .range(0..=86_400)
+                        .suffix(" s"),
+                );
+                ui.end_row();
                 secs_row(ui, "Startup grace", &mut self.startup_grace);
                 secs_row(ui, "Stop timeout", &mut self.stop_timeout);
             });

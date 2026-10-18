@@ -2,7 +2,10 @@ mod apps;
 mod dashboard;
 mod editor;
 mod events;
+mod logview;
+mod schedules;
 mod settings;
+mod webhooks;
 mod widgets;
 
 use std::sync::{Arc, Once};
@@ -11,6 +14,8 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, ViewportCommand};
 use gravekeeper_core::api::AppState;
 use gravekeeper_core::config::AppId;
+use gravekeeper_core::schedule::ScheduleId;
+use gravekeeper_core::webhook::WebhookId;
 use gravekeeper_core::{Command, CoreHandle};
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +28,8 @@ enum Tab {
     #[default]
     Dashboard,
     Apps,
+    Schedules,
+    Notifications,
     Events,
     Settings,
 }
@@ -33,6 +40,8 @@ enum Tab {
 struct Persisted {
     tab: Tab,
     selected: Option<AppId>,
+    schedule: Option<ScheduleId>,
+    webhook: Option<WebhookId>,
 }
 
 pub struct GravekeeperApp<'a> {
@@ -42,6 +51,8 @@ pub struct GravekeeperApp<'a> {
     process_started: Instant,
     tab: Tab,
     apps: apps::AppsView,
+    schedules: schedules::SchedulesView,
+    webhooks: webhooks::WebhooksView,
     events: events::EventsView,
     settings: settings::SettingsView,
     confirm_quit: bool,
@@ -71,6 +82,8 @@ impl<'a> GravekeeperApp<'a> {
             process_started,
             tab: persisted.tab,
             apps,
+            schedules: schedules::SchedulesView::with_selection(persisted.schedule),
+            webhooks: webhooks::WebhooksView::with_selection(persisted.webhook),
             events: events::EventsView::default(),
             settings: settings::SettingsView::default(),
             confirm_quit: false,
@@ -144,6 +157,8 @@ impl eframe::App for GravekeeperApp<'_> {
                 for (tab, label) in [
                     (Tab::Dashboard, "Dashboard"),
                     (Tab::Apps, "Applications"),
+                    (Tab::Schedules, "Schedules"),
+                    (Tab::Notifications, "Notifications"),
                     (Tab::Events, "Events"),
                     (Tab::Settings, "Settings"),
                 ] {
@@ -187,6 +202,8 @@ impl eframe::App for GravekeeperApp<'_> {
 
         match self.tab {
             Tab::Apps => self.apps.show(ui, self.core, &snapshot),
+            Tab::Schedules => self.schedules.show(ui, self.core, &snapshot),
+            Tab::Notifications => self.webhooks.show(ui, self.core, &snapshot),
             tab => {
                 egui::CentralPanel::default().show(ui, |ui| match tab {
                     Tab::Dashboard => {
@@ -197,7 +214,7 @@ impl eframe::App for GravekeeperApp<'_> {
                     }
                     Tab::Events => self.events.show(ui, &snapshot),
                     Tab::Settings => self.settings.show(ui, self.core, &snapshot),
-                    Tab::Apps => unreachable!(),
+                    Tab::Apps | Tab::Schedules | Tab::Notifications => unreachable!(),
                 });
             }
         }
@@ -214,6 +231,8 @@ impl eframe::App for GravekeeperApp<'_> {
             &Persisted {
                 tab: self.tab,
                 selected: self.apps.selected.clone(),
+                schedule: self.schedules.selected().cloned(),
+                webhook: self.webhooks.selected().cloned(),
             },
         );
     }

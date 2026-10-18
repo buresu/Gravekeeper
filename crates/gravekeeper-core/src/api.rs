@@ -9,7 +9,10 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AppId, AppSpec, Config, GeneralSettings};
+use crate::config::{AppId, AppSpec, Config, GeneralSettings, LoggingSettings};
+use crate::monitor::{DiskUsage, MonitoringSettings, ProcessUsage, Usage};
+use crate::schedule::{ScheduleId, ScheduleSpec};
+use crate::webhook::{WebhookId, WebhookSpec};
 
 /// A request from a front-end to the engine. Failures are reported as [`Event`]s.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,7 +28,19 @@ pub enum Command {
     SaveApp(Box<AppSpec>),
     /// Stops the application if needed and removes it.
     RemoveApp(AppId),
+    /// Moves an application up (negative) or down in the start order.
+    MoveApp(AppId, i32),
     SaveGeneral(GeneralSettings),
+    SaveMonitoring(MonitoringSettings),
+    SaveLogging(LoggingSettings),
+    SaveSchedule(Box<ScheduleSpec>),
+    RemoveSchedule(ScheduleId),
+    /// Runs a schedule's action now, outside its timetable.
+    RunSchedule(ScheduleId),
+    SaveWebhook(Box<WebhookSpec>),
+    RemoveWebhook(WebhookId),
+    /// Sends a test message; the outcome is reported as an event.
+    TestWebhook(WebhookId),
     /// Re-reads the configuration file (after fixing it by hand, for example).
     ReloadConfig,
 }
@@ -100,7 +115,7 @@ pub struct ExitInfo {
     pub crash_hint: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppStatus {
     pub id: AppId,
     pub name: String,
@@ -114,6 +129,8 @@ pub struct AppStatus {
     pub last_exit: Option<ExitInfo>,
     /// Consecutive failed runs since the last stable run or manual start.
     pub failures: u32,
+    /// Resource use of the main process, from the latest sample.
+    pub usage: Option<ProcessUsage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -124,6 +141,7 @@ pub enum EventLevel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EventKind {
     EngineStarted,
     EngineStopped,
@@ -138,10 +156,19 @@ pub enum EventKind {
     ConfigError,
     CommandRejected,
     HistoryUnavailable,
+    ScheduleSucceeded,
+    ScheduleFailed,
+    /// A run was due while Gravekeeper was not running or the computer was asleep.
+    ScheduleMissed,
+    ResourceAlert,
+    ResourceRecovered,
+    WebhookFailed,
+    /// Only for test messages; regular deliveries are not recorded.
+    WebhookDelivered,
 }
 
 impl EventKind {
-    const ALL: [Self; 12] = [
+    pub const ALL: [Self; 19] = [
         Self::EngineStarted,
         Self::EngineStopped,
         Self::AppStarted,
@@ -154,6 +181,13 @@ impl EventKind {
         Self::ConfigError,
         Self::CommandRejected,
         Self::HistoryUnavailable,
+        Self::ScheduleSucceeded,
+        Self::ScheduleFailed,
+        Self::ScheduleMissed,
+        Self::ResourceAlert,
+        Self::ResourceRecovered,
+        Self::WebhookFailed,
+        Self::WebhookDelivered,
     ];
 
     /// Stable name used in the history database.
@@ -171,6 +205,13 @@ impl EventKind {
             Self::ConfigError => "config_error",
             Self::CommandRejected => "command_rejected",
             Self::HistoryUnavailable => "history_unavailable",
+            Self::ScheduleSucceeded => "schedule_succeeded",
+            Self::ScheduleFailed => "schedule_failed",
+            Self::ScheduleMissed => "schedule_missed",
+            Self::ResourceAlert => "resource_alert",
+            Self::ResourceRecovered => "resource_recovered",
+            Self::WebhookFailed => "webhook_failed",
+            Self::WebhookDelivered => "webhook_delivered",
         }
     }
 
@@ -196,6 +237,41 @@ impl EventLevel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleStatus {
+    pub id: ScheduleId,
+    pub name: String,
+    pub enabled: bool,
+    pub next_run: Option<SystemTime>,
+    pub last_run: Option<ScheduleRun>,
+    /// A `run` action is executing right now.
+    pub running: bool,
+    /// Why the schedule cannot run (e.g. an unknown time zone).
+    pub problem: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleRun {
+    pub at: SystemTime,
+    /// `None` for a run in an earlier session, whose outcome is only in the event history.
+    pub success: Option<bool>,
+    pub summary: String,
+}
+
+/// Latest system measurements and a short history for charts.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Metrics {
+    pub at: Option<SystemTime>,
+    pub cpu_percent: Option<f32>,
+    pub memory: Option<Usage>,
+    pub disks: Vec<DiskUsage>,
+    /// Oldest first, one entry per sample.
+    pub cpu_history: Vec<f32>,
+    pub memory_history: Vec<f32>,
+    /// Descriptions of the alerts currently raised, e.g. `memory 93%`.
+    pub active_alerts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
     pub at: SystemTime,
     pub level: EventLevel,
@@ -211,11 +287,17 @@ pub struct Snapshot {
     pub started_at: SystemTime,
     pub config: Config,
     pub config_path: PathBuf,
+    /// History, log files (`logs/`) and configuration backups (`backups/`).
+    pub data_dir: PathBuf,
     /// Set when the configuration file could not be loaded. While set, the engine does not
     /// overwrite the file.
     pub config_error: Option<String>,
-    /// In configuration order.
+    /// When the computer started, if known.
+    pub boot_time: Option<SystemTime>,
+    /// In configuration (start) order.
     pub apps: Vec<AppStatus>,
+    pub schedules: Vec<ScheduleStatus>,
+    pub metrics: Metrics,
     /// Most recent events, oldest first.
     pub events: Vec<Event>,
     /// False if the history database could not be opened; events then live only in memory.

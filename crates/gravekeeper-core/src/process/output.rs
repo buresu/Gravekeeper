@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
@@ -28,6 +29,13 @@ pub struct LogLine {
 /// oldest lines are discarded.
 pub struct LogBuffer {
     inner: Mutex<Ring>,
+    file: Option<FileSink>,
+}
+
+/// Also appends every line, with a timestamp, to a rotating log file.
+pub struct FileSink {
+    pub writer: crate::logfile::LogWriter,
+    pub path: Arc<PathBuf>,
 }
 
 struct Ring {
@@ -45,11 +53,29 @@ impl LogBuffer {
                 capacity,
                 next_seq: 0,
             }),
+            file: None,
+        }
+    }
+
+    pub fn with_file(capacity: usize, sink: FileSink) -> Self {
+        Self {
+            file: Some(sink),
+            ..Self::new(capacity)
         }
     }
 
     pub fn push(&self, stream: Stream, bytes: &[u8]) {
         let text = String::from_utf8_lossy(bytes).into_owned();
+        if let Some(sink) = &self.file {
+            let tag = match stream {
+                Stream::Stdout => "out",
+                Stream::Stderr => "err",
+                Stream::Meta => "---",
+            };
+            let now = jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%S%.3fZ");
+            sink.writer
+                .write(&sink.path, format!("{now} {tag} {text}\n"));
+        }
         let mut ring = self.lock();
         if ring.lines.len() == ring.capacity {
             ring.lines.pop_front();

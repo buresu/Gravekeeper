@@ -1,15 +1,14 @@
 //! Application list, details with controls, and the output viewer.
 
-use std::collections::VecDeque;
 use std::time::SystemTime;
 
 use eframe::egui::{self, RichText};
 use gravekeeper_core::api::{AppState, AppStatus};
 use gravekeeper_core::config::AppId;
-use gravekeeper_core::process::{LogLine, Stream};
 use gravekeeper_core::{Command, CoreHandle, Snapshot};
 
 use super::editor::{Editor, EditorAction};
+use super::logview::LogView;
 use super::widgets::{self, format_relative, format_time};
 
 #[derive(Default)]
@@ -173,6 +172,25 @@ impl AppsView {
             {
                 self.confirm_remove = Some(id.clone());
             }
+            ui.separator();
+            let position = snapshot.apps.iter().position(|a| &a.id == id).unwrap_or(0);
+            if ui
+                .add_enabled(editable && position > 0, egui::Button::new("⬆"))
+                .on_hover_text("Start earlier (automatic starts go top to bottom)")
+                .clicked()
+            {
+                core.send(Command::MoveApp(id.clone(), -1));
+            }
+            if ui
+                .add_enabled(
+                    editable && position + 1 < snapshot.apps.len(),
+                    egui::Button::new("⬇"),
+                )
+                .on_hover_text("Start later")
+                .clicked()
+            {
+                core.send(Command::MoveApp(id.clone(), 1));
+            }
         });
         ui.add_space(4.0);
 
@@ -194,6 +212,18 @@ impl AppsView {
                 if let Some(pid) = status.pid {
                     ui.label("PID");
                     ui.label(pid.to_string());
+                    ui.end_row();
+                    ui.label("Resources");
+                    ui.label(match status.usage {
+                        Some(u) => format!(
+                            "CPU {:.1}% · memory {}",
+                            u.cpu_percent,
+                            widgets::format_bytes(u.memory_bytes)
+                        ),
+                        None if snapshot.config.monitoring.enabled => "measuring…".into(),
+                        None => "monitoring is off".into(),
+                    })
+                    .on_hover_text("Main process only. CPU: all cores together are 100%.");
                     ui.end_row();
                 }
                 ui.label(if status.state.is_active() {
@@ -231,10 +261,10 @@ impl AppsView {
         ui.separator();
         let capacity = snapshot.config.general.log_lines;
         let log = match &mut self.log {
-            Some(log) if &log.app == id => log,
-            _ => self.log.insert(LogView::new(id.clone())),
+            Some(log) if log.key() == id.0 => log,
+            _ => self.log.insert(LogView::new(id.0.clone())),
         };
-        log.pull(core, capacity);
+        log.pull(|from| core.logs_since(id, from), capacity);
         log.show(ui);
     }
 
@@ -262,97 +292,5 @@ impl AppsView {
         if modal.should_close() {
             self.confirm_remove = None;
         }
-    }
-}
-
-/// The output of one application, fetched incrementally from the engine.
-struct LogView {
-    app: AppId,
-    lines: VecDeque<LogLine>,
-    next_seq: u64,
-    stdout: bool,
-    stderr: bool,
-    meta: bool,
-    filter: String,
-}
-
-impl LogView {
-    fn new(app: AppId) -> Self {
-        Self {
-            app,
-            lines: VecDeque::new(),
-            next_seq: 0,
-            stdout: true,
-            stderr: true,
-            meta: true,
-            filter: String::new(),
-        }
-    }
-
-    fn pull(&mut self, core: &CoreHandle, capacity: usize) {
-        for line in core.logs_since(&self.app, self.next_seq) {
-            self.next_seq = line.seq + 1;
-            if self.lines.len() >= capacity.max(1) {
-                self.lines.pop_front();
-            }
-            self.lines.push_back(line);
-        }
-    }
-
-    fn show(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.strong("Output");
-            ui.checkbox(&mut self.stdout, "stdout");
-            ui.checkbox(&mut self.stderr, "stderr");
-            ui.checkbox(&mut self.meta, "events");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text("Filter")
-                    .desired_width(160.0),
-            );
-            if ui
-                .button("Clear")
-                .on_hover_text("Clears this view only")
-                .clicked()
-            {
-                self.lines.clear();
-            }
-        });
-
-        let filter = self.filter.to_lowercase();
-        let visible: Vec<&LogLine> = self
-            .lines
-            .iter()
-            .filter(|l| match l.stream {
-                Stream::Stdout => self.stdout,
-                Stream::Stderr => self.stderr,
-                Stream::Meta => self.meta,
-            })
-            .filter(|l| filter.is_empty() || l.text.to_lowercase().contains(&filter))
-            .collect();
-
-        let dark = ui.visuals().dark_mode;
-        let stderr_color = widgets::state_color(AppState::Backoff, dark);
-        let meta_color = ui.visuals().weak_text_color();
-        let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
-        egui::Frame::new()
-            .fill(ui.visuals().extreme_bg_color)
-            .inner_margin(4.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::both()
-                    .auto_shrink(false)
-                    .stick_to_bottom(true)
-                    .show_rows(ui, row_height, visible.len(), |ui, range| {
-                        for line in &visible[range] {
-                            let text = RichText::new(&line.text).monospace();
-                            let text = match line.stream {
-                                Stream::Stdout => text,
-                                Stream::Stderr => text.color(stderr_color),
-                                Stream::Meta => text.color(meta_color).italics(),
-                            };
-                            ui.add(egui::Label::new(text).extend());
-                        }
-                    });
-            });
     }
 }

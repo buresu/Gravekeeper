@@ -8,11 +8,17 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::monitor::MonitoringSettings;
 use crate::paths::create_private_dir;
 use crate::process::ProcessSpec;
+use crate::schedule::{self, ScheduleSpec};
+use crate::webhook::{self, WebhookSpec};
 
 /// Bump when the file format changes incompatibly, and add a migration in [`migrate`].
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// - 1: applications and general settings
+/// - 2: schedules, webhooks, monitoring and logging settings, `boot_delay`
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,8 +26,17 @@ pub struct Config {
     pub schema_version: u32,
     #[serde(default)]
     pub general: GeneralSettings,
+    #[serde(default)]
+    pub monitoring: MonitoringSettings,
+    #[serde(default)]
+    pub logging: LoggingSettings,
+    /// In start order: automatic starts happen top to bottom.
     #[serde(default, rename = "app")]
     pub apps: Vec<AppSpec>,
+    #[serde(default, rename = "schedule")]
+    pub schedules: Vec<ScheduleSpec>,
+    #[serde(default, rename = "webhook")]
+    pub webhooks: Vec<WebhookSpec>,
 }
 
 impl Default for Config {
@@ -29,9 +44,70 @@ impl Default for Config {
         Self {
             schema_version: SCHEMA_VERSION,
             general: GeneralSettings::default(),
+            monitoring: MonitoringSettings::default(),
+            logging: LoggingSettings::default(),
             apps: Vec::new(),
+            schedules: Vec::new(),
+            webhooks: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LoggingSettings {
+    /// Also write each application's output to `<data>/logs/<id>.log`.
+    pub app_log_files: bool,
+    /// Rotate a log file when it grows beyond this many MiB.
+    pub max_file_mb: u64,
+    /// Rotated files kept per log (`.1` is the newest).
+    pub keep_files: u32,
+}
+
+impl Default for LoggingSettings {
+    fn default() -> Self {
+        Self {
+            app_log_files: true,
+            max_file_mb: 10,
+            keep_files: 5,
+        }
+    }
+}
+
+/// A value that must not appear in logs or debug output (webhook URLs, tokens).
+///
+/// It is still stored in plain text in the configuration file, which is readable only by
+/// the user on Unix. Moving secrets to the OS credential store is planned.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret(***)")
+    }
+}
+
+/// A new identifier that is unique in practice (time-based, with a process-wide counter).
+pub(crate) fn generate_id() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos:x}{n:x}")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,16 +134,8 @@ impl Default for GeneralSettings {
 pub struct AppId(pub String);
 
 impl AppId {
-    /// A new identifier that is unique in practice (time-based, with a process-wide counter).
     pub fn generate() -> Self {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        Self(format!("{nanos:x}{n:x}"))
+        Self(generate_id())
     }
 }
 
@@ -98,6 +166,9 @@ pub struct AppSpec {
     /// Wait this long after Gravekeeper starts before an automatic start.
     #[serde(default, with = "secs")]
     pub start_delay: Duration,
+    /// Do not start automatically before the computer has been up this long.
+    #[serde(default, with = "secs")]
+    pub boot_delay: Duration,
     /// The process must stay up this long to count as started; exiting earlier is a
     /// start failure.
     #[serde(default = "default_startup_grace", with = "secs")]
@@ -121,6 +192,7 @@ impl AppSpec {
             enabled: true,
             autostart: false,
             start_delay: Duration::ZERO,
+            boot_delay: Duration::ZERO,
             startup_grace: default_startup_grace(),
             stop_timeout: default_stop_timeout(),
             restart: RestartPolicy::default(),
@@ -177,7 +249,7 @@ impl Default for RestartPolicy {
     }
 }
 
-fn yes() -> bool {
+pub(crate) fn yes() -> bool {
     true
 }
 
@@ -190,7 +262,7 @@ fn default_stop_timeout() -> Duration {
 }
 
 /// Durations are written as whole seconds in the file.
-mod secs {
+pub(crate) mod secs {
     use std::time::Duration;
 
     use serde::{Deserialize, Deserializer, Serializer};
@@ -207,15 +279,15 @@ mod secs {
 /// A problem that makes a configuration unusable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationError {
-    /// Name of the application concerned, if any.
-    pub app: Option<String>,
+    /// Name of the application, schedule or webhook concerned, if any.
+    pub subject: Option<String>,
     pub message: String,
 }
 
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.app {
-            Some(app) => write!(f, "{app}: {}", self.message),
+        match &self.subject {
+            Some(subject) => write!(f, "{subject}: {}", self.message),
             None => f.write_str(&self.message),
         }
     }
@@ -229,7 +301,7 @@ pub fn validate_app(app: &AppSpec) -> Vec<ValidationError> {
         app.name.clone()
     };
     let error = |message: &str| ValidationError {
-        app: Some(label.clone()),
+        subject: Some(label.clone()),
         message: message.to_owned(),
     };
 
@@ -266,7 +338,7 @@ pub fn validate(config: &Config) -> Vec<ValidationError> {
     let mut errors: Vec<_> = config.apps.iter().flat_map(validate_app).collect();
     if config.general.log_lines == 0 {
         errors.push(ValidationError {
-            app: None,
+            subject: None,
             message: "log lines must be at least 1".into(),
         });
     }
@@ -275,15 +347,64 @@ pub fn validate(config: &Config) -> Vec<ValidationError> {
     for app in &config.apps {
         if !ids.insert(&app.id) {
             errors.push(ValidationError {
-                app: Some(app.name.clone()),
+                subject: Some(app.name.clone()),
                 message: format!("duplicate id {}", app.id),
             });
         }
         if !names.insert(app.name.trim()) {
             errors.push(ValidationError {
-                app: Some(app.name.clone()),
+                subject: Some(app.name.clone()),
                 message: "another application has the same name".into(),
             });
+        }
+    }
+
+    let general = |message: &str| ValidationError {
+        subject: None,
+        message: message.to_owned(),
+    };
+    if config.monitoring.interval.is_zero() {
+        errors.push(general("monitoring interval must be at least 1 second"));
+    }
+    let m = &config.monitoring;
+    if [m.cpu_alert, m.memory_alert, m.disk_alert]
+        .iter()
+        .any(|p| *p > 100)
+    {
+        errors.push(general(
+            "alert thresholds are percentages (0 to turn off, up to 100)",
+        ));
+    }
+    if config.logging.max_file_mb == 0 {
+        errors.push(general("log file size must be at least 1 MiB"));
+    }
+
+    let mut schedule_ids = HashSet::new();
+    for spec in &config.schedules {
+        let error = |message: String| ValidationError {
+            subject: Some(spec.name.clone()),
+            message,
+        };
+        errors.extend(schedule::validate(spec).into_iter().map(error));
+        if !schedule_ids.insert(&spec.id) {
+            errors.push(error(format!("duplicate id {}", spec.id)));
+        }
+        if let Some(app) = spec.action.app()
+            && !ids.contains(app)
+        {
+            errors.push(error(format!("refers to an unknown application ({app})")));
+        }
+    }
+
+    let mut webhook_ids = HashSet::new();
+    for spec in &config.webhooks {
+        let error = |message: String| ValidationError {
+            subject: Some(spec.name.clone()),
+            message,
+        };
+        errors.extend(webhook::validate(spec).into_iter().map(error));
+        if !webhook_ids.insert(&spec.id) {
+            errors.push(error(format!("duplicate id {}", spec.id)));
         }
     }
     errors
@@ -353,8 +474,15 @@ pub fn parse(text: &str) -> Result<Config, LoadError> {
 
 /// Converts a file of an older schema version to the current [`Config`].
 fn migrate(version: u32, text: &str) -> Result<Config, LoadError> {
+    let parse_error = |e: toml::de::Error| LoadError::Parse(e.to_string());
     match version {
-        SCHEMA_VERSION => toml::from_str(text).map_err(|e| LoadError::Parse(e.to_string())),
+        SCHEMA_VERSION => toml::from_str(text).map_err(parse_error),
+        // Version 2 only added optional sections and fields.
+        1 => {
+            let mut table: toml::Table = toml::from_str(text).map_err(parse_error)?;
+            table.insert("schema_version".into(), i64::from(SCHEMA_VERSION).into());
+            toml::Value::Table(table).try_into().map_err(parse_error)
+        }
         other => Err(LoadError::UnsupportedVersion(other)),
     }
 }
@@ -444,7 +572,7 @@ mod tests {
     fn minimal_app_uses_defaults() {
         let config = parse(
             r#"
-            schema_version = 1
+            schema_version = 2
             [[app]]
             id = "a1"
             name = "worker"
@@ -469,7 +597,7 @@ mod tests {
         ));
         // Typos are reported instead of silently ignored.
         assert!(matches!(
-            parse("schema_version = 1\n[general]\nstart_minimised = true"),
+            parse("schema_version = 2\n[general]\nstart_minimised = true"),
             Err(LoadError::Parse(_))
         ));
     }
@@ -495,6 +623,56 @@ mod tests {
         let path = dir.path().join("config.toml");
         assert!(save(&path, &config).is_err());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn migrates_version_1() {
+        let config = parse(
+            r#"
+            schema_version = 1
+            [general]
+            start_minimized = true
+            [[app]]
+            id = "a1"
+            name = "worker"
+            program = "/bin/worker"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.schema_version, SCHEMA_VERSION);
+        assert!(config.general.start_minimized);
+        assert_eq!(config.apps[0].boot_delay, Duration::ZERO);
+        assert_eq!(config.monitoring, MonitoringSettings::default());
+    }
+
+    #[test]
+    fn schedules_must_refer_to_existing_apps() {
+        let config = parse(
+            r#"
+            schema_version = 2
+            [[schedule]]
+            id = "s1"
+            name = "Nightly"
+            when = { kind = "daily", time = "03:00" }
+            action = { kind = "restart", app = "missing" }
+            "#,
+        );
+        match config {
+            Err(LoadError::Invalid(errors)) => {
+                assert!(
+                    errors[0].message.contains("unknown application"),
+                    "{errors:?}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn secrets_are_hidden_from_debug_output() {
+        let secret = Secret::new("https://hooks.example.com/T000/B000/XXXX");
+        assert_eq!(format!("{secret:?}"), "Secret(***)");
+        assert_eq!(secret.expose(), "https://hooks.example.com/T000/B000/XXXX");
     }
 
     #[test]

@@ -4,17 +4,24 @@
 
 ```
 gravekeeper (bin: eframe GUI, tray, autostart, main)
-    │  CoreHandle::send(Command) / snapshot() -> Arc<Snapshot> / logs_since(app, seq)
+    │  CoreHandle::send(Command) / snapshot() -> Arc<Snapshot>
+    │            logs_since(app, seq) / schedule_logs_since(schedule, seq)
     ▼
 gravekeeper-core (lib: no GUI dependency)
-    ├─ engine      Engine thread (Tokio current-thread runtime): state machine, timers, commands
-    ├─ supervisor  Restart decisions (pure, no I/O) — RestartTracker
-    ├─ api         Command / Snapshot / AppStatus / Event (serde-enabled; the future IPC protocol)
-    ├─ config      TOML schema, validation, atomic save, migrations
-    ├─ store       SQLite event history on its own writer thread
-    ├─ process     Spawn, stop, process-tree termination, stdout/stderr capture (LogBuffer)
-    ├─ paths       Per-user locations ($GRAVEKEEPER_HOME override)
-    └─ scheduler / monitoring / notify   (Phase 2)
+    ├─ engine         Engine thread (Tokio current-thread runtime): state machine, timers, commands
+    │  ├─ schedules   running scheduled tasks
+    │  ├─ monitoring  samples → per-app usage, chart history, threshold alerts
+    │  └─ notify      events → webhook deliveries
+    ├─ supervisor     Restart decisions (pure) — RestartTracker
+    ├─ schedule       Schedule types and next-run / missed-run planning (pure)
+    ├─ monitor        Sampler thread (sysinfo) and debounced thresholds (pure)
+    ├─ webhook        Webhook types, payloads, HTTP delivery with retries
+    ├─ api            Command / Snapshot / AppStatus / Event (serde-enabled; the future IPC protocol)
+    ├─ config         TOML schema, validation, atomic save, migrations, Secret
+    ├─ store          SQLite event history and schedule run times on a writer thread
+    ├─ logfile        Rotating files, log writer thread, config backups
+    ├─ process        Spawn, stop, process-tree termination, stdout/stderr capture (LogBuffer)
+    └─ paths          Per-user locations ($GRAVEKEEPER_HOME override)
 ```
 
 ### Boundary rules
@@ -30,11 +37,13 @@ gravekeeper-core (lib: no GUI dependency)
 | Thread | Role |
 |---|---|
 | main | eframe / winit event loop (must be the main thread on macOS) |
-| gravekeeper-core | Tokio current-thread runtime: commands, timers, one task per running process |
-| gravekeeper-store | SQLite writer; batches queued events into one transaction |
+| gravekeeper-core | Tokio current-thread runtime: commands, timers, one task per running process, schedule run or webhook delivery |
+| gravekeeper-store | SQLite writer; batches queued writes into one transaction |
+| gravekeeper-logs | Writes application and schedule output to rotating files; never blocks senders (drops and counts lines if it falls behind) |
+| gravekeeper-monitor | Samples CPU, memory, disks and supervised processes; not joined on shutdown because a disk query can hang |
 | tray (Linux only) | D-Bus thread owned by tray-icon's ksni backend |
 
-Neither the GUI thread nor the engine thread ever waits on disk or on a child process.
+Neither the GUI thread nor the engine thread ever waits on disk, the network or a child process. Tasks and threads report back to the engine through one `Internal` message channel (process exits, schedule runs, webhook outcomes) and a sample channel.
 
 ## Startup
 
@@ -42,7 +51,9 @@ Neither the GUI thread nor the engine thread ever waits on disk or on a child pr
 2. `CoreHandle::start` takes an exclusive lock on `<data>/gravekeeper.lock` (`File::try_lock`). If another instance holds it, the GUI shows a small "already running" notice and exits with code 3, so two supervisors never start the same applications.
 3. The history database is opened; failure is recorded as a `HistoryUnavailable` event and events are then kept in memory only.
 4. The configuration is loaded. If it is invalid, the engine starts with no applications, sets `Snapshot::config_error`, and refuses to save until the file is fixed and reloaded — it never overwrites a file it could not read.
-5. Applications with `autostart` enter `Waiting` with their `start_delay`.
+5. Applications with `autostart` enter `Waiting` until `max(start_delay, boot_delay − uptime)`. Only the first waiting application in list order is eligible, so automatic starts happen top to bottom.
+6. Schedules are planned with catch-up: a run missed since the last recorded run is reported and, with `run-once`, made due immediately (see [configuration.md](configuration.md#schedules)).
+7. Monitoring starts; webhooks start delivering once the runtime runs (events from startup are queued).
 
 ## Supervised application lifecycle
 
@@ -76,11 +87,31 @@ Paused (a flag, not a state): exits are recorded but never restarted.
 
 ## Configuration changes
 
-`SaveApp`, `RemoveApp` and `SaveGeneral` build a new configuration, validate and save it, then reconcile the running state: new applications appear as `Stopped`, removed ones are stopped and dropped, disabling a running application stops it. Changes to a running application's command take effect at its next start. See [configuration.md](configuration.md) for the file format.
+Every change (`SaveApp`, `MoveApp`, `SaveSchedule`, `SaveWebhook`, `SaveMonitoring`, …) builds a new configuration, backs up the current file to `backups/`, validates and saves the new one, then reconciles the running state: new applications appear as `Stopped`, removed ones are stopped and dropped, disabling a running application stops it, changed schedules are re-planned (without catch-up), and the sampler is restarted if monitoring settings changed. Changes to a running application's command take effect at its next start. See [configuration.md](configuration.md) for the file format.
+
+## Schedules
+
+Planning (`schedule::plan`, `schedule::next_after`) is pure calendar arithmetic with jiff and is unit-tested for DST gaps and folds, missed runs, and after-boot behavior. The engine keeps each schedule's next run as a wall-clock time. Because Tokio timers run on the monotonic clock, which does not advance during sleep on every OS, the engine wakes at least every 30 seconds to compare against the wall clock; a run found more than 2 minutes late is handled as missed. The last run time is persisted (`schedule_runs` table) so missed runs and intervals survive restarts.
+
+`run` actions execute like applications (own process group / Job Object, output captured to a per-schedule buffer and log file) under a time limit, after which the tree is stopped. `start` / `stop` / `restart` actions go through the same code as the GUI buttons.
+
+## Monitoring and alerts
+
+The sampler thread uses sysinfo: global CPU (needs two samples), memory as total minus available, non-removable disks (pseudo file systems and macOS system-volume helpers are hidden), and the main process of each supervised application (CPU normalized so all cores are 100%). Values the platform cannot provide are `None` and shown as unsupported.
+
+Each metric (`cpu`, `memory`, `disk:<mount>`) has a `Threshold`: it alerts after the value has stayed at or above the limit for `sustain`, and recovers only below `limit − 5` points, so a value hovering around the limit does not flap. Alerts and recoveries are events (and therefore webhook notifications). The latest sample and 120 samples of history are in the snapshot.
+
+## Notifications
+
+`emit` passes every event to the notifier, which sends it to each enabled webhook whose `events` (and optional `apps`) match. Each delivery is its own task with up to 4 attempts and exponential backoff; at most 50 run at once. Outcomes come back to the engine; failures become `webhook_failed` events, which are excluded from notifications so a broken endpoint cannot cause a loop. URLs and header values are `Secret`s: hidden from `Debug`, and errors are reported with `reqwest::Error::without_url`.
+
+## Log files
+
+With `app_log_files`, each application's and schedule's `LogBuffer` also hands lines (timestamped, tagged `out` / `err` / `---`) to the log writer thread, which appends them to `logs/<id>.log` and rotates by size. Gravekeeper's own `tracing` output goes to `logs/gravekeeper.log` through the same `RotatingFile`. Log file settings are read at startup.
 
 ## Event history
 
-Events (`Event { at, level, kind, app, message }`) are kept in the snapshot (latest 500) and written to `<data>/history.sqlite3` in WAL mode. The schema is versioned with `PRAGMA user_version`; the oldest rows beyond 100,000 are deleted at startup.
+Events (`Event { at, level, kind, app, message }`) are kept in the snapshot (latest 500) and written to `<data>/history.sqlite3` in WAL mode, together with each schedule's last run time. The schema is versioned with `PRAGMA user_version` (migration 1: events, 2: schedule runs); the oldest events beyond 100,000 are deleted at startup.
 
 ## Window and tray lifecycle
 

@@ -28,6 +28,8 @@ allow = [
     "0BSD",
     "Unlicense",
     "Unicode-3.0",
+    # Mozilla's root certificate data (webpki-root-certs, via rustls-platform-verifier).
+    "CDLA-Permissive-2.0",
     # Fonts bundled by epaint (egui's default fonts).
     "OFL-1.1",
     "Ubuntu-font-1.0",

@@ -7,10 +7,20 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["http"]
+# Webhook delivery. Only meant to be disabled for type-checking other targets from Linux
+# (TLS needs a C cross-compiler); without it webhooks report an error instead of sending.
+http = ["dep:reqwest"]
+
 [dependencies]
+jiff.workspace = true
 process-wrap = { workspace = true, features = ["tokio1", "kill-on-drop", "process-group", "job-object", "creation-flags"] }
+reqwest = { workspace = true, optional = true }
 rusqlite.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sysinfo = { workspace = true, features = ["system", "disk"] }
 tokio = { workspace = true, features = ["rt", "sync", "time", "process", "io-util", "macros"] }
 toml.workspace = true
 tracing.workspace = true
@@ -21,7 +31,6 @@ windows.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-sysinfo = { workspace = true, features = ["system"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
 
 # Cross-platform helper process used by integration tests (see tests/process.rs).

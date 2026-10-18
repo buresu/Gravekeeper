@@ -1,7 +1,12 @@
+mod monitoring;
+mod notify;
+mod schedules;
+
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs::File;
 use std::io;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
@@ -12,8 +17,10 @@ use crate::api::{
     AppState, AppStatus, Command, Event, EventKind, EventLevel, ExitInfo, ExitReason, Snapshot,
 };
 use crate::config::{self, AppId, AppSpec, Config, RestartMode};
+use crate::logfile::{LogWriter, LogWriterThread};
 use crate::paths::{Paths, create_private_dir};
-use crate::process::{ExitKind, LogBuffer, LogLine, ManagedChild, Stream};
+use crate::process::{ExitKind, FileSink, LogBuffer, LogLine, ManagedChild, Stream};
+use crate::schedule::ScheduleId;
 use crate::store::Store;
 use crate::supervisor::{self, Decision, RestartTracker};
 
@@ -24,6 +31,8 @@ pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 
 /// Events kept in the snapshot (the database keeps more).
 const RECENT_EVENTS: usize = 500;
+/// Timestamped copies of the configuration kept in `<data>/backups`.
+const CONFIG_BACKUPS: usize = 20;
 
 #[derive(Debug)]
 pub enum StartError {
@@ -52,6 +61,7 @@ impl From<io::Error> for StartError {
 struct Shared {
     snapshot: RwLock<Arc<Snapshot>>,
     logs: RwLock<HashMap<AppId, Arc<LogBuffer>>>,
+    schedule_logs: RwLock<HashMap<ScheduleId, Arc<LogBuffer>>>,
 }
 
 /// Owner-side handle to the engine running on its own thread.
@@ -118,6 +128,16 @@ impl CoreHandle {
         logs.get(id).map(|log| log.since(from)).unwrap_or_default()
     }
 
+    /// Output of a schedule's `run` actions with `seq >= from`, oldest first.
+    pub fn schedule_logs_since(&self, id: &ScheduleId, from: u64) -> Vec<LogLine> {
+        let logs = self
+            .shared
+            .schedule_logs
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        logs.get(id).map(|log| log.since(from)).unwrap_or_default()
+    }
+
     /// Stops all applications, then the engine, and waits for it to finish.
     pub fn shutdown(&self) {
         let Some(thread) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take() else {
@@ -134,6 +154,13 @@ impl Drop for CoreHandle {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// Messages from tasks and threads back to the engine.
+enum Internal {
+    Exited(Exited),
+    ScheduleFinished(schedules::Finished),
+    Webhook(notify::Outcome),
 }
 
 /// Message from a process task back to the engine.
@@ -171,7 +198,7 @@ struct Run {
 }
 
 impl AppRuntime {
-    fn new(spec: &AppSpec, log_lines: usize) -> Self {
+    fn new(spec: &AppSpec, log: LogBuffer) -> Self {
         Self {
             state: if spec.enabled {
                 AppState::Stopped
@@ -183,7 +210,7 @@ impl AppRuntime {
             next_attempt: None,
             last_exit: None,
             tracker: RestartTracker::default(),
-            log: Arc::new(LogBuffer::new(log_lines.max(1))),
+            log: Arc::new(log),
             run: None,
             generation: 0,
             restart_after_stop: false,
@@ -206,24 +233,32 @@ impl AppRuntime {
 struct Engine {
     paths: Paths,
     commands: mpsc::UnboundedReceiver<Command>,
-    internal_tx: mpsc::UnboundedSender<Exited>,
-    internal_rx: mpsc::UnboundedReceiver<Exited>,
+    internal_tx: mpsc::UnboundedSender<Internal>,
+    internal_rx: mpsc::UnboundedReceiver<Internal>,
     notifier: Notifier,
     shared: Arc<Shared>,
     started_at: SystemTime,
+    boot_time: Option<SystemTime>,
     config: Config,
     config_error: Option<String>,
     apps: HashMap<AppId, AppRuntime>,
     events: VecDeque<Event>,
     store: Option<Store>,
+    /// Writes application and schedule output to files (if enabled at startup).
+    log_files: Option<(LogWriter, LogWriterThread)>,
+    schedules: schedules::State,
+    monitoring: monitoring::State,
+    notify: notify::State,
+    /// Startup has finished; schedules planned from now on do not catch up missed runs.
+    booted: bool,
 }
 
 impl Engine {
     fn new(
         paths: Paths,
         commands: mpsc::UnboundedReceiver<Command>,
-        internal_tx: mpsc::UnboundedSender<Exited>,
-        internal_rx: mpsc::UnboundedReceiver<Exited>,
+        internal_tx: mpsc::UnboundedSender<Internal>,
+        internal_rx: mpsc::UnboundedReceiver<Internal>,
         notifier: Notifier,
     ) -> Self {
         let started_at = SystemTime::now();
@@ -232,13 +267,22 @@ impl Engine {
                 started_at,
                 config: Config::default(),
                 config_path: paths.config_file.clone(),
+                data_dir: paths.data_dir.clone(),
                 config_error: None,
+                boot_time: None,
                 apps: Vec::new(),
+                schedules: Vec::new(),
+                metrics: Default::default(),
                 events: Vec::new(),
                 history_available: false,
             })),
             logs: RwLock::new(HashMap::new()),
+            schedule_logs: RwLock::new(HashMap::new()),
         });
+        let boot_time = match sysinfo::System::boot_time() {
+            0 => None,
+            secs => Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)),
+        };
         Self {
             paths,
             commands,
@@ -247,11 +291,17 @@ impl Engine {
             notifier,
             shared,
             started_at,
+            boot_time,
             config: Config::default(),
             config_error: None,
             apps: HashMap::new(),
             events: VecDeque::new(),
             store: None,
+            log_files: None,
+            schedules: schedules::State::default(),
+            monitoring: monitoring::State::default(),
+            notify: notify::State::default(),
+            booted: false,
         }
     }
 
@@ -259,8 +309,9 @@ impl Engine {
     /// caller's thread so the first snapshot is complete when `CoreHandle::start` returns.
     fn boot(&mut self) {
         match Store::open(&self.paths.history_db(), RECENT_EVENTS) {
-            Ok((store, recent)) => {
-                self.events.extend(recent);
+            Ok((store, recalled)) => {
+                self.events.extend(recalled.events);
+                self.schedules.last_runs = recalled.schedule_runs;
                 self.store = Some(store);
             }
             Err(err) => self.emit(
@@ -277,35 +328,63 @@ impl Engine {
             "Gravekeeper started".into(),
         );
 
-        match config::load(&self.paths.config_file) {
+        let loaded = config::load(&self.paths.config_file);
+        let logging = match &loaded {
+            Ok(config) => config.logging.clone(),
+            Err(_) => Default::default(),
+        };
+        if logging.app_log_files {
+            match LogWriter::start(logging.max_file_mb * 1024 * 1024, logging.keep_files) {
+                Ok(writer) => self.log_files = Some(writer),
+                Err(err) => tracing::warn!(%err, "cannot start the log file writer"),
+            }
+        }
+        match loaded {
             Ok(config) => self.apply_config(config),
             Err(err) => self.config_failed(err.to_string()),
         }
 
         let now = Instant::now();
+        let uptime = self
+            .boot_time
+            .and_then(|boot| SystemTime::now().duration_since(boot).ok());
         for spec in &self.config.apps {
             if spec.enabled && spec.autostart {
+                // Without a known boot time, `boot_delay` cannot be honored; start as if the
+                // computer had been up long enough.
+                let boot_wait =
+                    uptime.map_or(Duration::ZERO, |up| spec.boot_delay.saturating_sub(up));
                 let app = self
                     .apps
                     .get_mut(&spec.id)
                     .expect("runtime exists for every app");
                 app.set_state(AppState::Waiting);
-                app.next_attempt = Some(now + spec.start_delay);
+                app.next_attempt = Some(now + spec.start_delay.max(boot_wait));
             }
         }
+        self.booted = true;
+        self.start_monitoring();
         self.publish();
     }
 
     async fn run(mut self) {
+        self.start_notifications();
         loop {
-            let deadline = self.next_deadline();
+            let deadline = [self.next_deadline(), self.schedule_deadline()]
+                .into_iter()
+                .flatten()
+                .min();
             tokio::select! {
                 command = self.commands.recv() => match command {
                     Some(Command::Shutdown) | None => break,
                     Some(command) => self.handle(command),
                 },
-                Some(exited) = self.internal_rx.recv() => self.on_exited(exited),
-                () = sleep_until(deadline) => self.on_timers(),
+                Some(message) = self.internal_rx.recv() => self.on_internal(message),
+                Some(sample) = self.monitoring.recv() => self.on_sample(sample),
+                () = sleep_until(deadline) => {
+                    self.on_timers();
+                    self.on_schedule_timers();
+                }
             }
             self.publish();
         }
@@ -317,6 +396,14 @@ impl Engine {
             "Gravekeeper stopped".into(),
         );
         self.publish();
+    }
+
+    fn on_internal(&mut self, message: Internal) {
+        match message {
+            Internal::Exited(exited) => self.on_exited(exited),
+            Internal::ScheduleFinished(finished) => self.on_schedule_finished(finished),
+            Internal::Webhook(outcome) => self.on_webhook_outcome(outcome),
+        }
     }
 
     fn handle(&mut self, command: Command) {
@@ -352,6 +439,16 @@ impl Engine {
                 config.apps.retain(|a| a.id != id);
                 self.save_config(config);
             }
+            Command::MoveApp(id, offset) => {
+                let mut config = self.config.clone();
+                if let Some(from) = config.apps.iter().position(|a| a.id == id) {
+                    let last = config.apps.len() as i64 - 1;
+                    let to = (from as i64 + i64::from(offset)).clamp(0, last) as usize;
+                    let app = config.apps.remove(from);
+                    config.apps.insert(to, app);
+                    self.save_config(config);
+                }
+            }
             Command::SaveGeneral(general) => {
                 let config = Config {
                     general,
@@ -359,10 +456,54 @@ impl Engine {
                 };
                 self.save_config(config);
             }
+            Command::SaveMonitoring(monitoring) => {
+                let config = Config {
+                    monitoring,
+                    ..self.config.clone()
+                };
+                self.save_config(config);
+                self.start_monitoring();
+            }
+            Command::SaveLogging(logging) => {
+                let config = Config {
+                    logging,
+                    ..self.config.clone()
+                };
+                self.save_config(config);
+            }
+            Command::SaveSchedule(spec) => {
+                let mut config = self.config.clone();
+                match config.schedules.iter_mut().find(|s| s.id == spec.id) {
+                    Some(existing) => *existing = *spec,
+                    None => config.schedules.push(*spec),
+                }
+                self.save_config(config);
+            }
+            Command::RemoveSchedule(id) => {
+                let mut config = self.config.clone();
+                config.schedules.retain(|s| s.id != id);
+                self.save_config(config);
+            }
+            Command::RunSchedule(id) => self.run_schedule_now(&id),
+            Command::SaveWebhook(spec) => {
+                let mut config = self.config.clone();
+                match config.webhooks.iter_mut().find(|w| w.id == spec.id) {
+                    Some(existing) => *existing = *spec,
+                    None => config.webhooks.push(*spec),
+                }
+                self.save_config(config);
+            }
+            Command::RemoveWebhook(id) => {
+                let mut config = self.config.clone();
+                config.webhooks.retain(|w| w.id != id);
+                self.save_config(config);
+            }
+            Command::TestWebhook(id) => self.test_webhook(&id),
             Command::ReloadConfig => match config::load(&self.paths.config_file) {
                 Ok(config) => {
                     self.config_error = None;
                     self.apply_config(config);
+                    self.start_monitoring();
                     self.emit(
                         EventLevel::Info,
                         EventKind::ConfigSaved,
@@ -409,6 +550,13 @@ impl Engine {
             );
             return;
         }
+        if let Err(err) = crate::logfile::backup(
+            &self.paths.config_file,
+            &self.paths.data_dir.join("backups"),
+            CONFIG_BACKUPS,
+        ) {
+            tracing::warn!(%err, "cannot back up the configuration");
+        }
         if let Err(err) = config::save(&self.paths.config_file, &config) {
             self.reject(format!("configuration not saved: {err}"));
             return;
@@ -445,10 +593,12 @@ impl Engine {
         }
 
         for spec in &config.apps {
+            let log_lines = config.general.log_lines;
+            let log = self.new_log(log_lines, || format!("{}.log", spec.id));
             let app = self
                 .apps
                 .entry(spec.id.clone())
-                .or_insert_with(|| AppRuntime::new(spec, config.general.log_lines));
+                .or_insert_with(|| AppRuntime::new(spec, log));
             self.shared
                 .logs
                 .write()
@@ -473,6 +623,25 @@ impl Engine {
         for id in disabled_running {
             self.stop(&id, false);
         }
+        self.plan_schedules(!self.booted);
+    }
+
+    /// An output buffer, also written to `<data>/logs/<file>` when log files are enabled.
+    fn new_log(&self, capacity: usize, file: impl FnOnce() -> String) -> LogBuffer {
+        match &self.log_files {
+            Some((writer, _)) => LogBuffer::with_file(
+                capacity.max(1),
+                FileSink {
+                    writer: writer.clone(),
+                    path: Arc::new(self.logs_dir().join(file())),
+                },
+            ),
+            None => LogBuffer::new(capacity.max(1)),
+        }
+    }
+
+    fn logs_dir(&self) -> PathBuf {
+        self.paths.data_dir.join("logs")
     }
 
     fn write_logs(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<AppId, Arc<LogBuffer>>> {
@@ -702,11 +871,24 @@ impl Engine {
         }
     }
 
+    /// The first application, in start order, that is still waiting for its automatic
+    /// start. Applications below it wait for it, so automatic starts happen in order.
+    fn waiting_head(&self) -> Option<&AppId> {
+        self.config.apps.iter().map(|s| &s.id).find(|id| {
+            self.apps
+                .get(*id)
+                .is_some_and(|a| a.state == AppState::Waiting)
+        })
+    }
+
     fn next_deadline(&self) -> Option<Instant> {
+        let head = self.waiting_head();
         self.apps
             .iter()
             .filter_map(|(id, app)| match app.state {
-                AppState::Waiting | AppState::Backoff => app.next_attempt,
+                AppState::Waiting if Some(id) == head => app.next_attempt,
+                AppState::Waiting => None,
+                AppState::Backoff => app.next_attempt,
                 AppState::Starting => {
                     let grace = self.spec(id)?.startup_grace;
                     app.run.as_ref().map(|r| r.started + grace)
@@ -719,11 +901,19 @@ impl Engine {
     fn on_timers(&mut self) {
         let now = Instant::now();
         let mut due = Vec::new();
+        // Automatic starts in order: each one waits for those above it.
+        while let Some(head) = self.waiting_head().cloned() {
+            if !self.apps[&head].next_attempt.is_some_and(|t| t <= now) {
+                break;
+            }
+            self.spawn(&head);
+            if self.apps[&head].state == AppState::Waiting {
+                break; // cannot happen, but never loop forever
+            }
+        }
         for (id, app) in &mut self.apps {
             match app.state {
-                AppState::Waiting | AppState::Backoff
-                    if app.next_attempt.is_some_and(|t| t <= now) =>
-                {
+                AppState::Backoff if app.next_attempt.is_some_and(|t| t <= now) => {
                     due.push(id.clone());
                 }
                 AppState::Starting => {
@@ -768,7 +958,7 @@ impl Engine {
         let deadline = tokio::time::Instant::now() + longest + Duration::from_secs(5);
         while self.apps.values().any(|a| a.state.is_active()) {
             match tokio::time::timeout_at(deadline, self.internal_rx.recv()).await {
-                Ok(Some(exited)) => self.on_exited(exited),
+                Ok(Some(message)) => self.on_internal(message),
                 Ok(None) | Err(_) => {
                     tracing::warn!("some applications did not stop in time; killing them");
                     break;
@@ -800,6 +990,7 @@ impl Engine {
         if let Some(store) = &self.store {
             store.record(event.clone());
         }
+        self.notify(&event);
         if self.events.len() == RECENT_EVENTS {
             self.events.pop_front();
         }
@@ -827,15 +1018,25 @@ impl Engine {
                         .map(|t| wall + t.saturating_duration_since(now)),
                     last_exit: app.last_exit.clone(),
                     failures: app.tracker.consecutive(),
+                    usage: app.run.as_ref().and_then(|r| self.monitoring.usage(r.pid)),
                 })
             })
             .collect();
+        self.monitoring.set_pids(
+            self.apps
+                .values()
+                .filter_map(|a| a.run.as_ref().map(|r| r.pid)),
+        );
         let snapshot = Snapshot {
             started_at: self.started_at,
             config: self.config.clone(),
             config_path: self.paths.config_file.clone(),
+            data_dir: self.paths.data_dir.clone(),
             config_error: self.config_error.clone(),
+            boot_time: self.boot_time,
             apps,
+            schedules: self.schedule_statuses(),
+            metrics: self.monitoring.metrics(),
             events: self.events.iter().cloned().collect(),
             history_available: self.store.is_some(),
         };
@@ -854,7 +1055,7 @@ async fn watch(
     generation: u64,
     mut child: ManagedChild,
     stop: oneshot::Receiver<Duration>,
-    tx: mpsc::UnboundedSender<Exited>,
+    tx: mpsc::UnboundedSender<Internal>,
 ) {
     enum Outcome {
         Exited(io::Result<ExitKind>),
@@ -879,11 +1080,11 @@ async fn watch(
             forced: o.forced,
         }),
     };
-    let _ = tx.send(Exited {
+    let _ = tx.send(Internal::Exited(Exited {
         id,
         generation,
         result,
-    });
+    }));
 }
 
 async fn sleep_until(deadline: Option<Instant>) {

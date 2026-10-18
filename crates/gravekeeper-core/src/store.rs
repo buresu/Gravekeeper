@@ -1,5 +1,6 @@
 //! Event history in SQLite, written on a dedicated thread so the engine never waits on disk.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -9,12 +10,14 @@ use rusqlite::{Connection, params};
 
 use crate::api::{Event, EventKind, EventLevel};
 use crate::config::AppId;
+use crate::schedule::ScheduleId;
 
 /// Older events beyond this many are deleted when the store is opened.
 const RETAINED_EVENTS: i64 = 100_000;
 
 /// Migrations, applied in order. `PRAGMA user_version` records how many have run.
-const MIGRATIONS: &[&str] = &["CREATE TABLE events (
+const MIGRATIONS: &[&str] = &[
+    "CREATE TABLE events (
         id       INTEGER PRIMARY KEY,
         at_ms    INTEGER NOT NULL,
         level    TEXT NOT NULL,
@@ -23,17 +26,34 @@ const MIGRATIONS: &[&str] = &["CREATE TABLE events (
         app_name TEXT,
         message  TEXT NOT NULL
     );
-    CREATE INDEX events_at ON events (at_ms);"];
+    CREATE INDEX events_at ON events (at_ms);",
+    // When each schedule last ran, to detect runs missed while Gravekeeper was not running.
+    "CREATE TABLE schedule_runs (
+        schedule_id TEXT PRIMARY KEY,
+        last_run_ms INTEGER NOT NULL
+    );",
+];
+
+enum Write {
+    Event(Event),
+    ScheduleRun(ScheduleId, SystemTime),
+}
+
+/// What the store remembers from previous runs of Gravekeeper.
+pub struct Recalled {
+    /// Up to the requested number of latest events, oldest first.
+    pub events: Vec<Event>,
+    pub schedule_runs: HashMap<ScheduleId, SystemTime>,
+}
 
 pub struct Store {
-    tx: Option<mpsc::Sender<Event>>,
+    tx: Option<mpsc::Sender<Write>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Store {
-    /// Opens (creating or migrating) the database and returns up to `recent` latest events,
-    /// oldest first.
-    pub fn open(path: &Path, recent: usize) -> rusqlite::Result<(Self, Vec<Event>)> {
+    /// Opens (creating or migrating) the database and recalls what it holds.
+    pub fn open(path: &Path, recent: usize) -> rusqlite::Result<(Self, Recalled)> {
         let mut conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         migrate(&mut conn)?;
@@ -41,7 +61,10 @@ impl Store {
             "DELETE FROM events WHERE id <= (SELECT MAX(id) FROM events) - ?1",
             [RETAINED_EVENTS],
         )?;
-        let events = latest(&conn, recent)?;
+        let recalled = Recalled {
+            events: latest(&conn, recent)?,
+            schedule_runs: schedule_runs(&conn)?,
+        };
 
         let (tx, rx) = mpsc::channel();
         let thread = std::thread::Builder::new()
@@ -53,15 +76,23 @@ impl Store {
                 tx: Some(tx),
                 thread: Some(thread),
             },
-            events,
+            recalled,
         ))
     }
 
     pub fn record(&self, event: Event) {
+        self.send(Write::Event(event));
+    }
+
+    pub fn record_schedule_run(&self, id: ScheduleId, at: SystemTime) {
+        self.send(Write::ScheduleRun(id, at));
+    }
+
+    fn send(&self, write: Write) {
         if let Some(tx) = &self.tx
-            && tx.send(event).is_err()
+            && tx.send(write).is_err()
         {
-            tracing::warn!("history writer has stopped; event not saved");
+            tracing::warn!("history writer has stopped; not saved");
         }
     }
 }
@@ -93,7 +124,7 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn writer(mut conn: Connection, rx: mpsc::Receiver<Event>) {
+fn writer(mut conn: Connection, rx: mpsc::Receiver<Write>) {
     while let Ok(first) = rx.recv() {
         // Write whatever has queued up in one transaction.
         let batch: Vec<_> = std::iter::once(first).chain(rx.try_iter()).collect();
@@ -103,25 +134,40 @@ fn writer(mut conn: Connection, rx: mpsc::Receiver<Event>) {
     }
 }
 
-fn insert(conn: &mut Connection, events: &[Event]) -> rusqlite::Result<()> {
+fn insert(conn: &mut Connection, writes: &[Write]) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     {
-        let mut stmt = tx.prepare_cached(
+        let mut event = tx.prepare_cached(
             "INSERT INTO events (at_ms, level, kind, app_id, app_name, message)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
-        for e in events {
-            stmt.execute(params![
-                to_millis(e.at),
-                e.level.as_str(),
-                e.kind.as_str(),
-                e.app_id.as_ref().map(|id| id.0.as_str()),
-                e.app_name,
-                e.message,
-            ])?;
+        let mut run = tx.prepare_cached(
+            "INSERT INTO schedule_runs (schedule_id, last_run_ms) VALUES (?1, ?2)
+             ON CONFLICT (schedule_id) DO UPDATE SET last_run_ms = excluded.last_run_ms",
+        )?;
+        for write in writes {
+            match write {
+                Write::Event(e) => event.execute(params![
+                    to_millis(e.at),
+                    e.level.as_str(),
+                    e.kind.as_str(),
+                    e.app_id.as_ref().map(|id| id.0.as_str()),
+                    e.app_name,
+                    e.message,
+                ])?,
+                Write::ScheduleRun(id, at) => run.execute(params![id.0, to_millis(*at)])?,
+            };
         }
     }
     tx.commit()
+}
+
+fn schedule_runs(conn: &Connection) -> rusqlite::Result<HashMap<ScheduleId, SystemTime>> {
+    let mut stmt = conn.prepare("SELECT schedule_id, last_run_ms FROM schedule_runs")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((ScheduleId(row.get(0)?), from_millis(row.get(1)?)))
+    })?;
+    rows.collect()
 }
 
 fn latest(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<Event>> {
@@ -176,17 +222,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history.sqlite3");
 
-        let (store, recent) = Store::open(&path, 10).unwrap();
-        assert!(recent.is_empty());
+        let (store, recalled) = Store::open(&path, 10).unwrap();
+        assert!(recalled.events.is_empty());
         for i in 0..5 {
             store.record(event(i));
         }
+        let run = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        store.record_schedule_run(ScheduleId("s".into()), UNIX_EPOCH);
+        store.record_schedule_run(ScheduleId("s".into()), run);
         drop(store);
 
-        let (_store, recent) = Store::open(&path, 3).unwrap();
-        let messages: Vec<_> = recent.iter().map(|e| e.message.as_str()).collect();
+        let (_store, recalled) = Store::open(&path, 3).unwrap();
+        let messages: Vec<_> = recalled.events.iter().map(|e| e.message.as_str()).collect();
         assert_eq!(messages, ["event 2", "event 3", "event 4"]);
-        assert_eq!(recent[2], event(4));
+        assert_eq!(recalled.events[2], event(4));
+        assert_eq!(recalled.schedule_runs[&ScheduleId("s".into())], run);
     }
 
     #[test]

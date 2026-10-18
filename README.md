@@ -4,10 +4,11 @@ A desktop tool for supervising and operating applications on Windows, macOS and 
 start/stop/restart processes, capture their output, detect crashes, restart with back-off,
 run schedules and send webhook notifications. Written in Rust with an [egui] GUI.
 
-> **Status:** Phase 1 (MVP). Applications can be added, started, stopped and restarted
-> automatically with back-off; output and an event history are shown in the GUI, which lives
-> in the system tray. Linux is tested on real hardware; Windows and macOS are built and tested
-> in CI only. See [the implementation plan](docs/implementation-plan.md).
+> **Status:** Phase 2. Applications are supervised with automatic restarts and start in a
+> defined order; schedules run actions on a timetable; webhooks report crashes, failed
+> schedules and resource alerts; CPU, memory and disks are monitored; output goes to rotating
+> log files. Linux is tested on real hardware; Windows and macOS are built and tested in CI
+> only. See [the implementation plan](docs/implementation-plan.md).
 
 ## Layout
 

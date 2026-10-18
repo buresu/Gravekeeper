@@ -12,7 +12,13 @@ use std::time::Instant;
 use eframe::egui;
 use gravekeeper_core::paths::Paths;
 use gravekeeper_core::{CoreHandle, StartError};
+use std::sync::Mutex;
+
+use gravekeeper_core::logfile::RotatingFile;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tray_icon::TrayIcon;
 
 use crate::shell::{CloseBehavior, Shell, TrayAction};
@@ -46,11 +52,8 @@ impl Options {
 
 fn main() -> ExitCode {
     let process_started = Instant::now();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,zbus=error")),
-        )
-        .init();
+    let paths = Paths::from_env();
+    init_logging(paths.as_ref().ok());
 
     let mut options = match Options::parse() {
         Ok(options) => options,
@@ -60,7 +63,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let paths = match Paths::from_env() {
+    let paths = match paths {
         Ok(paths) => paths,
         Err(err) => {
             tracing::error!(%err, "cannot determine where to store data");
@@ -134,6 +137,24 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Logs to stderr and, when the data directory is known, to `<data>/logs/gravekeeper.log`
+/// (rotated at 10 MiB, 5 old files kept).
+fn init_logging(paths: Option<&Paths>) {
+    let filter =
+        || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,zbus=error"));
+    let file = paths.map(|p| {
+        let file = RotatingFile::new(p.data_dir.join("logs/gravekeeper.log"), 10 << 20, 5);
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(Mutex::new(file))
+            .with_filter(filter())
+    });
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(filter()))
+        .with(file)
+        .init();
 }
 
 fn create_tray(shell: &Arc<Shell>, options: &mut Options) -> Option<TrayIcon> {

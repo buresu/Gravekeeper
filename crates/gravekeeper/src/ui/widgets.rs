@@ -83,6 +83,48 @@ pub fn format_duration(d: Duration) -> String {
     }
 }
 
+/// `1.5 GiB`
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// A small line chart of percentages (0-100), oldest value on the left.
+pub fn sparkline(ui: &mut egui::Ui, values: &[f32], color: Color32) {
+    let size = egui::vec2(160.0, 36.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        egui::StrokeKind::Inside,
+    );
+    if values.len() < 2 {
+        return;
+    }
+    let step = rect.width() / (values.len() - 1) as f32;
+    let points: Vec<egui::Pos2> = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let y = rect.bottom() - rect.height() * (v.clamp(0.0, 100.0) / 100.0);
+            egui::pos2(rect.left() + i as f32 * step, y)
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, color)));
+}
+
 /// A full-width colored box for problems that need the user's attention.
 pub fn banner(ui: &mut egui::Ui, color: Color32, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
@@ -106,6 +148,13 @@ mod tests {
         assert_eq!(format_duration(Duration::from_secs(125)), "2m 5s");
         assert_eq!(format_duration(Duration::from_secs(7260)), "2h 1m");
         assert_eq!(format_duration(Duration::from_secs(90000)), "1d 1h");
+    }
+
+    #[test]
+    fn bytes_are_readable() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1536), "1.5 KiB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
     }
 
     #[test]
