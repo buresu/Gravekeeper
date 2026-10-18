@@ -1,0 +1,28 @@
+[package]
+name = "gravekeeper-core"
+description = "Supervisor engine of Gravekeeper (process control, state, persistence). Has no GUI dependency."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+process-wrap = { workspace = true, features = ["tokio1", "kill-on-drop", "process-group", "job-object"] }
+serde.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "process", "io-util", "macros"] }
+tracing.workspace = true
+
+[dev-dependencies]
+sysinfo = { workspace = true, features = ["system"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+
+# Cross-platform helper process used by integration tests (see tests/process.rs).
+[[bin]]
+name = "gk-test-helper"
+path = "src/bin/gk-test-helper.rs"
+test = false
+doc = false
+
+[lints]
+workspace = true
