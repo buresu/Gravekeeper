@@ -52,6 +52,17 @@ async fn abort_looks_like_a_crash() {
     assert!(exit.looks_like_crash(), "{exit:?}");
 }
 
+/// On Windows a crash dialog would keep the process alive until someone dismissed it.
+#[tokio::test]
+async fn access_violation_exits_without_waiting_for_a_dialog() {
+    let (mut child, _) = spawn(&["segfault"], 10);
+    let exit = tokio::time::timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("the crashed process did not exit")
+        .unwrap();
+    assert!(exit.looks_like_crash(), "{exit:?}");
+}
+
 #[tokio::test]
 async fn spawn_failure_is_an_error() {
     let log = Arc::new(LogBuffer::new(10));

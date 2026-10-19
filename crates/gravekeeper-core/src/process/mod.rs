@@ -146,6 +146,9 @@ impl ManagedChild {
         }
         command.wrap(KillOnDrop);
 
+        #[cfg(windows)]
+        let mut child = spawn_without_error_dialogs(&mut command)?;
+        #[cfg(not(windows))]
         let mut child = command.spawn()?;
         let pid = child
             .id()
@@ -272,6 +275,35 @@ fn terminate_with_parent(cmd: &mut tokio::process::Command) {
             Ok(())
         });
     }
+}
+
+/// Spawns with Windows' crash and critical-error dialogs turned off for the child, which
+/// inherits the error mode at creation. Such a dialog keeps a crashed process from exiting
+/// (and from being terminated) until someone dismisses it, so the crash would go unnoticed
+/// and the restart would wait. This also means Windows Error Reporting is not invoked for
+/// the child.
+#[cfg(windows)]
+fn spawn_without_error_dialogs(command: &mut CommandWrap) -> io::Result<Box<dyn ChildWrapper>> {
+    use std::sync::Mutex;
+    use windows::Win32::System::Diagnostics::Debug::{
+        GetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX,
+        SetErrorMode, THREAD_ERROR_MODE,
+    };
+
+    // The error mode belongs to the whole process, so concurrent spawns must not restore it
+    // under each other.
+    static ERROR_MODE: Mutex<()> = Mutex::new(());
+    let _guard = ERROR_MODE.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: these only read and set this process's error mode, which is restored below.
+    let previous = THREAD_ERROR_MODE(unsafe { GetErrorMode() });
+    unsafe {
+        SetErrorMode(
+            previous | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX,
+        );
+    }
+    let result = command.spawn();
+    unsafe { SetErrorMode(previous) };
+    result
 }
 
 #[cfg(test)]

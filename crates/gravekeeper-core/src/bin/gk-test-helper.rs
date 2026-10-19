@@ -6,6 +6,7 @@
 //!   flood BYTES  write BYTES bytes of 1 KiB lines to stdout and to stderr, concurrently
 //!   exit CODE    exit with CODE
 //!   abort        abort the process (crash)
+//!   segfault     read an invalid address (crash through an unhandled access violation)
 //!   sleep SECS   sleep, then exit 0
 //!   tree SECS    spawn `sleep SECS` as a child, print its pid, then sleep SECS
 
@@ -34,6 +35,14 @@ fn main() {
         }
         "exit" => std::process::exit(n as i32),
         "abort" => std::process::abort(),
+        // Unlike `abort` (a fast fail on Windows), this goes through the OS's unhandled
+        // exception path, where Windows would show a crash dialog.
+        "segfault" => {
+            // SAFETY: none; crashing is the point. The volatile read keeps it from being
+            // optimized away.
+            let value = unsafe { std::ptr::read_volatile(std::hint::black_box(8 as *const u8)) };
+            std::process::exit(i32::from(value));
+        }
         "sleep" => std::thread::sleep(Duration::from_secs(n)),
         // The grandchild is deliberately left running: tests check that stopping this
         // process also stops it.
