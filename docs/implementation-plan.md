@@ -127,7 +127,7 @@ Requested before Phase 4: native file dialogs and a less dated look.
 - [x] **New layout**: sidebar navigation with problem badges, page headers with the main action, master–detail pages with cards, status pills, empty states with a call to action, grouped forms with help text
 - [x] **Theme**: bundled Noto Sans (regular and semibold) and Phosphor icons, both subset to a few dozen KB; higher-contrast text; tuned light and dark palettes; System / Light / Dark choice in Settings
 - [x] **Accessibility**: every control has an accessible name (enforced by the GUI tests); status dots are drawn instead of relying on a glyph that Noto Sans lacks
-- [x] **GUI tests** with egui_kittest, and on-demand screenshots of every page
+- [x] **GUI tests** with egui_kittest, and on-demand screenshots of every page (also used for the README)
 
 ## Phase 4: Extensions
 

@@ -24,8 +24,16 @@ interval = 1
 [[app]]
 id = "web"
 name = "Web server"
-program = "/bin/sleep"
-args = ["600"]
+program = "/bin/sh"
+args = ["-c", """
+echo 'listening on 0.0.0.0:8080'
+for path in / /api/items /api/items/42 /static/app.js /api/health /api/items; do
+  echo "GET $path 200"
+done
+echo 'warning: slow query on /api/items (412 ms)' >&2
+echo 'POST /api/items 201'
+exec sleep 600
+"""]
 autostart = true
 startup_grace = 0
 
@@ -227,6 +235,9 @@ fn screenshots() {
 }
 
 fn save(harness: &mut Harness<'static, GravekeeperApp<'static>>, path: &Path) {
+    // No pointer left over a clicked button.
+    harness.remove_cursor();
+    harness.run_steps(2);
     let image = harness.render().expect("render");
     let file = std::fs::File::create(path).unwrap();
     let mut encoder = png::Encoder::new(file, image.width(), image.height());

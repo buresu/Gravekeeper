@@ -11,6 +11,39 @@ run schedules and send webhook notifications. Written in Rust with an [egui] GUI
 > Linux is tested on real hardware; Windows and macOS are built and tested in CI only.
 > See [the implementation plan](docs/implementation-plan.md).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.png">
+  <img src="docs/images/dashboard-light.png" alt="Dashboard: application states, things needing attention, system resources, upcoming schedules and recent problems">
+</picture>
+
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/applications-dark.png">
+        <img src="docs/images/applications-light.png" alt="Applications page: the selected application and its live output">
+      </picture>
+      <p align="center">Applications and their live output</p>
+    </td>
+    <td width="33%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/schedule-editor-dark.png">
+        <img src="docs/images/schedule-editor-light.png" alt="Schedule editor: timetable, missed-run policy and action">
+      </picture>
+      <p align="center">Schedules</p>
+    </td>
+    <td width="33%" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/events-dark.png">
+        <img src="docs/images/events-light.png" alt="Event history filtered by level and source">
+      </picture>
+      <p align="center">Event history</p>
+    </td>
+  </tr>
+</table>
+
+Screenshots follow your light or dark preference; the app has both themes.
+
 ## Installing
 
 Download a package from the releases (`.deb`, `.AppImage`, Windows `-setup.exe`, macOS `.dmg`),
