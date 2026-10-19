@@ -3,14 +3,16 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use eframe::egui::{self, RichText};
-use gravekeeper_core::api::{AppState, ScheduleStatus};
+use eframe::egui::{self, Margin, RichText};
+use gravekeeper_core::api::ScheduleStatus;
 use gravekeeper_core::config::AppId;
 use gravekeeper_core::schedule::{self, Action, Day, MissedRun, ScheduleId, ScheduleSpec, When};
 use gravekeeper_core::{Command, CoreHandle, Snapshot};
 
 use super::logview::LogView;
+use super::picker::{Kind, Picker};
 use super::widgets::{self, format_duration, format_relative, format_time};
+use super::{form, icons, theme};
 
 #[derive(Default)]
 pub struct SchedulesView {
@@ -32,87 +34,157 @@ impl SchedulesView {
         self.selected.as_ref()
     }
 
+    fn start_adding(&mut self, snapshot: &Snapshot) {
+        let editor = ScheduleEditor::new_schedule(snapshot);
+        self.selected = Some(editor.id.clone());
+        self.editor = Some(editor);
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui, core: &CoreHandle, snapshot: &Snapshot) {
         let editable = snapshot.config_error.is_none();
+        if self.editor.is_none()
+            && !self
+                .selected
+                .as_ref()
+                .is_some_and(|id| snapshot.schedules.iter().any(|s| &s.id == id))
+        {
+            self.selected = snapshot.schedules.first().map(|s| s.id.clone());
+        }
+
+        widgets::page_header(
+            ui,
+            "Schedules",
+            Some("Start, stop or restart applications, or run programs, on a timetable."),
+            |ui| {
+                if widgets::primary_button(ui, editable, icons::PLUS, "Add schedule").clicked() {
+                    self.start_adding(snapshot);
+                }
+            },
+        );
+
+        if snapshot.schedules.is_empty() && self.editor.is_none() {
+            if widgets::empty_state(
+                ui,
+                icons::CALENDAR,
+                "No schedules yet",
+                "Restart something every night, run a cleanup every hour, or start a program after boot.",
+                editable.then_some((icons::PLUS, "Add schedule")),
+            ) {
+                self.start_adding(snapshot);
+            }
+            self.confirm_removal(ui, core);
+            return;
+        }
+
+        let p = theme::palette(ui);
         egui::Panel::left("schedule_list")
             .resizable(true)
-            .default_size(220.0)
-            .min_size(160.0)
+            .default_size(260.0)
+            .min_size(200.0)
+            .show_separator_line(false)
+            .frame(egui::Frame::new().inner_margin(Margin {
+                right: 16,
+                ..Margin::ZERO
+            }))
             .show(ui, |ui| {
-                ui.add_space(4.0);
-                if ui
-                    .add_enabled(editable, egui::Button::new("Add schedule"))
-                    .clicked()
-                {
-                    let editor = ScheduleEditor::new_schedule(snapshot);
-                    self.selected = Some(editor.id.clone());
-                    self.editor = Some(editor);
-                }
-                ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for status in &snapshot.schedules {
-                        let selected = self.selected.as_ref() == Some(&status.id);
-                        let text = if status.enabled {
-                            RichText::new(&status.name)
-                        } else {
-                            RichText::new(&status.name).weak()
-                        };
-                        if ui.selectable_label(selected, text).clicked() {
-                            self.selected = Some(status.id.clone());
-                            self.editor = None;
-                        }
-                    }
+                widgets::card(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for status in &snapshot.schedules {
+                                let selected = self.selected.as_ref() == Some(&status.id)
+                                    && !self.editor.as_ref().is_some_and(|e| e.is_new);
+                                let response = widgets::list_row(
+                                    ui,
+                                    ("schedule", &status.id),
+                                    &status.name,
+                                    selected,
+                                    |ui| {
+                                        ui.horizontal(|ui| {
+                                            let (icon, color) = match status
+                                                .last_run
+                                                .as_ref()
+                                                .and_then(|r| r.success)
+                                            {
+                                                Some(false) => (icons::WARNING_CIRCLE, p.danger),
+                                                _ if status.running => (icons::TIMER, p.warning),
+                                                _ if status.enabled => (icons::CLOCK, p.accent),
+                                                _ => (icons::PAUSE, p.neutral),
+                                            };
+                                            ui.label(RichText::new(icon).color(color));
+                                            let name = RichText::new(&status.name).strong();
+                                            ui.label(if status.enabled {
+                                                name
+                                            } else {
+                                                name.color(p.text_weak)
+                                            });
+                                        });
+                                        let detail = match (status.enabled, status.next_run) {
+                                            (false, _) => "Disabled".to_owned(),
+                                            (true, Some(next)) => {
+                                                format!("Next {}", format_relative(next))
+                                            }
+                                            (true, None) => "No upcoming run".to_owned(),
+                                        };
+                                        ui.label(RichText::new(detail).small().color(p.text_weak));
+                                    },
+                                );
+                                if response.clicked() {
+                                    self.selected = Some(status.id.clone());
+                                    self.editor = None;
+                                }
+                            }
+                        });
                 });
             });
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(editor) = &mut self.editor {
-                match editor.show(ui, snapshot) {
-                    EditorAction::None => {}
-                    EditorAction::Cancel => self.editor = None,
-                    EditorAction::Save(spec) => {
-                        self.selected = Some(spec.id.clone());
-                        core.send(Command::SaveSchedule(spec));
-                        self.editor = None;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new())
+            .show(ui, |ui| {
+                if let Some(editor) = &mut self.editor {
+                    match editor.show(ui, snapshot) {
+                        EditorAction::None => {}
+                        EditorAction::Cancel => self.editor = None,
+                        EditorAction::Save(spec) => {
+                            self.selected = Some(spec.id.clone());
+                            core.send(Command::SaveSchedule(spec));
+                            self.editor = None;
+                        }
                     }
+                } else if let Some(status) = self
+                    .selected
+                    .as_ref()
+                    .and_then(|id| snapshot.schedules.iter().find(|s| &s.id == id))
+                {
+                    self.details(ui, core, snapshot, status);
                 }
-            } else if let Some(status) = self
-                .selected
-                .as_ref()
-                .and_then(|id| snapshot.schedules.iter().find(|s| &s.id == id))
-            {
-                self.details(ui, core, snapshot, status);
-            } else if snapshot.schedules.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.label(
-                        "No schedules yet. Use \"Add schedule\" to run something on a timetable.",
-                    );
-                });
-            } else {
-                ui.centered_and_justified(|ui| ui.label("Select a schedule."));
-            }
-        });
+            });
 
-        if let Some(id) = self.confirm_remove.clone() {
-            let modal = egui::Modal::new(egui::Id::unique("confirm_remove_schedule")).show(
-                ui.ctx(),
-                |ui| {
-                    ui.heading("Remove schedule?");
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Remove").clicked() {
-                            core.send(Command::RemoveSchedule(id.clone()));
-                            self.confirm_remove = None;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.confirm_remove = None;
-                        }
-                    });
-                },
-            );
-            if modal.should_close() {
-                self.confirm_remove = None;
-            }
+        self.confirm_removal(ui, core);
+    }
+
+    fn confirm_removal(&mut self, ui: &mut egui::Ui, core: &CoreHandle) {
+        let Some(id) = self.confirm_remove.clone() else {
+            return;
+        };
+        let modal =
+            egui::Modal::new(egui::Id::unique("confirm_remove_schedule")).show(ui.ctx(), |ui| {
+                ui.set_max_width(400.0);
+                widgets::section_title(ui, "Remove schedule?");
+                ui.label("It will no longer run. Its past runs stay in the event history.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if widgets::danger_button(ui, true, icons::TRASH, "Remove").clicked() {
+                        core.send(Command::RemoveSchedule(id.clone()));
+                        self.confirm_remove = None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_remove = None;
+                    }
+                });
+            });
+        if modal.should_close() {
+            self.confirm_remove = None;
         }
     }
 
@@ -126,81 +198,93 @@ impl SchedulesView {
         let Some(spec) = snapshot.config.schedules.iter().find(|s| s.id == status.id) else {
             return;
         };
+        let p = theme::palette(ui);
         let editable = snapshot.config_error.is_none();
-        ui.heading(&spec.name);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!status.running, egui::Button::new("Run now"))
-                .on_hover_text("Runs the action once without changing the timetable")
-                .clicked()
-            {
-                core.send(Command::RunSchedule(spec.id.clone()));
-            }
-            if ui
-                .add_enabled(editable, egui::Button::new("Edit"))
-                .clicked()
-            {
-                self.editor = Some(ScheduleEditor::from_spec(spec));
-            }
-            if ui
-                .add_enabled(editable, egui::Button::new("Remove"))
-                .clicked()
-            {
-                self.confirm_remove = Some(spec.id.clone());
-            }
-        });
-        ui.add_space(4.0);
-        egui::Grid::new("schedule_status")
-            .num_columns(2)
-            .spacing([16.0, 4.0])
-            .show(ui, |ui| {
-                ui.label("When");
+        widgets::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&spec.name).text_style(egui::TextStyle::Heading));
+                if !spec.enabled {
+                    widgets::pill(ui, "Disabled", p.neutral);
+                } else if status.running {
+                    widgets::pill(ui, &widgets::icon_text(icons::TIMER, "Running"), p.warning);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::danger_button(ui, editable, icons::TRASH, "")
+                        .on_hover_text("Remove")
+                        .clicked()
+                    {
+                        self.confirm_remove = Some(spec.id.clone());
+                    }
+                    if widgets::button(ui, editable, icons::EDIT, "Edit").clicked() {
+                        self.editor = Some(ScheduleEditor::from_spec(spec));
+                    }
+                    if widgets::primary_button(ui, !status.running, icons::PLAY, "Run now")
+                        .on_hover_text("Runs the action once without changing the timetable")
+                        .clicked()
+                    {
+                        core.send(Command::RunSchedule(spec.id.clone()));
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            widgets::properties(ui, "schedule_status", |ui| {
+                widgets::property_label(ui, "When");
                 ui.label(describe_when(spec));
                 ui.end_row();
-                ui.label("Action");
+                widgets::property_label(ui, "Action");
                 ui.label(describe_action(&spec.action, snapshot));
                 ui.end_row();
-                ui.label("Next run");
-                ui.label(match (status.enabled, status.next_run) {
-                    (false, _) => "disabled".into(),
-                    (true, Some(t)) => format!("{} ({})", format_time(t), format_relative(t)),
-                    (true, None) => "none".into(),
-                });
+                widgets::property_label(ui, "Next run");
+                match (status.enabled, status.next_run) {
+                    (false, _) => ui.label("disabled"),
+                    (true, Some(t)) => ui.label(format_relative(t)).on_hover_text(format_time(t)),
+                    (true, None) => ui.label("none"),
+                };
                 ui.end_row();
                 if let Some(last) = &status.last_run {
-                    ui.label("Last run");
-                    let dark = ui.visuals().dark_mode;
-                    let color = match last.success {
-                        Some(true) => widgets::state_color(AppState::Running, dark),
-                        Some(false) => widgets::state_color(AppState::GaveUp, dark),
-                        None => ui.visuals().text_color(),
-                    };
-                    ui.colored_label(
-                        color,
-                        format!("{} — {}", format_time(last.at), last.summary),
-                    );
-                    ui.end_row();
-                }
-                if status.running {
-                    ui.label("Status");
-                    ui.label("running now");
+                    widgets::property_label(ui, "Last run");
+                    ui.horizontal(|ui| {
+                        match last.success {
+                            Some(true) => widgets::pill(
+                                ui,
+                                &widgets::icon_text(icons::CHECK, "Succeeded"),
+                                p.success,
+                            ),
+                            Some(false) => widgets::pill(
+                                ui,
+                                &widgets::icon_text(icons::ERROR, "Failed"),
+                                p.danger,
+                            ),
+                            None => widgets::pill(ui, "Earlier session", p.neutral),
+                        };
+                        ui.label(&last.summary).on_hover_text(format_time(last.at));
+                    });
                     ui.end_row();
                 }
                 if let Some(problem) = &status.problem {
-                    ui.label("Problem");
-                    ui.colored_label(ui.visuals().error_fg_color, problem);
+                    widgets::property_label(ui, "Problem");
+                    ui.colored_label(p.danger, problem);
                     ui.end_row();
                 }
             });
+        });
 
         if matches!(spec.action, Action::Run { .. }) {
-            ui.separator();
-            let log = match &mut self.log {
-                Some(log) if log.key() == spec.id.0 => log,
-                _ => self.log.insert(LogView::new(spec.id.0.clone())),
-            };
-            log.pull(|from| core.schedule_logs_since(&spec.id, from), 1000);
-            log.show(ui);
+            ui.add_space(12.0);
+            widgets::card(ui, |ui| {
+                let log = match &mut self.log {
+                    Some(log) if log.key() == spec.id.0 => log,
+                    _ => self.log.insert(LogView::new(spec.id.0.clone())),
+                };
+                log.pull(|from| core.schedule_logs_since(&spec.id, from), 1000);
+                let file = snapshot.config.logging.app_log_files.then(|| {
+                    snapshot
+                        .data_dir
+                        .join("logs")
+                        .join(format!("schedule-{}.log", spec.id))
+                });
+                log.show(ui, file.as_deref());
+            });
         }
     }
 }
@@ -317,6 +401,13 @@ struct ScheduleEditor {
     missed: MissedRun,
     time_zone: String,
     errors: Vec<String>,
+    picker: Picker<Field>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Program,
+    Cwd,
 }
 
 impl ScheduleEditor {
@@ -346,6 +437,7 @@ impl ScheduleEditor {
             missed: MissedRun::Skip,
             time_zone: String::new(),
             errors: Vec::new(),
+            picker: Picker::default(),
         }
     }
 
@@ -434,6 +526,7 @@ impl ScheduleEditor {
             missed: MissedRun::Skip,
             time_zone: String::new(),
             errors: Vec::new(),
+            picker: Picker::default(),
         }
     }
 
@@ -522,141 +615,17 @@ impl ScheduleEditor {
 
     fn show(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) -> EditorAction {
         let mut action = EditorAction::None;
-        ui.heading(if self.is_new {
-            "Add schedule"
-        } else {
-            "Edit schedule"
-        });
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("schedule_editor")
-                .num_columns(2)
-                .spacing([12.0, 6.0])
-                .min_col_width(130.0)
-                .show(ui, |ui| {
-                    ui.label("Name");
-                    ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("e.g. Nightly restart"));
-                    ui.end_row();
-                    ui.label("Enabled");
-                    ui.checkbox(&mut self.enabled, "Run on this timetable");
-                    ui.end_row();
-
-                    ui.label("When");
-                    egui::ComboBox::from_id_salt("when_kind")
-                        .selected_text(when_label(self.when))
-                        .show_ui(ui, |ui| {
-                            for kind in [
-                                WhenKind::Once,
-                                WhenKind::Daily,
-                                WhenKind::Weekly,
-                                WhenKind::Interval,
-                                WhenKind::AfterBoot,
-                            ] {
-                                ui.selectable_value(&mut self.when, kind, when_label(kind));
-                            }
-                        });
-                    ui.end_row();
-                    match self.when {
-                        WhenKind::Once => {
-                            ui.label("Date and time");
-                            ui.add(egui::TextEdit::singleline(&mut self.date_time).hint_text("2026-12-24 20:00"));
-                            ui.end_row();
-                        }
-                        WhenKind::Daily => {
-                            ui.label("Time");
-                            ui.add(egui::TextEdit::singleline(&mut self.time).hint_text("09:30").desired_width(80.0));
-                            ui.end_row();
-                        }
-                        WhenKind::Weekly => {
-                            ui.label("Days");
-                            ui.horizontal(|ui| {
-                                for (i, day) in Day::ALL.iter().enumerate() {
-                                    ui.checkbox(&mut self.days[i], day_label(*day));
-                                }
-                            });
-                            ui.end_row();
-                            ui.label("Time");
-                            ui.add(egui::TextEdit::singleline(&mut self.time).hint_text("09:30").desired_width(80.0));
-                            ui.end_row();
-                        }
-                        WhenKind::Interval => {
-                            ui.label("Every");
-                            ui.add(egui::DragValue::new(&mut self.every).range(1..=31_536_000).suffix(" s"));
-                            ui.end_row();
-                        }
-                        WhenKind::AfterBoot => {
-                            ui.label("Delay after boot");
-                            ui.add(egui::DragValue::new(&mut self.boot_delay).range(0..=86_400).suffix(" s"));
-                            ui.end_row();
-                        }
-                    }
-                    if !matches!(self.when, WhenKind::Interval | WhenKind::AfterBoot) {
-                        ui.label("Time zone");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.time_zone)
-                                .hint_text("system time zone (or e.g. Asia/Tokyo)"),
-                        );
-                        ui.end_row();
-                    }
-                    if self.when != WhenKind::AfterBoot {
-                        ui.label("Missed runs").on_hover_text(
-                            "Runs that were due while Gravekeeper was not running or the computer was asleep",
-                        );
-                        egui::ComboBox::from_id_salt("missed")
-                            .selected_text(missed_label(self.missed))
-                            .show_ui(ui, |ui| {
-                                for m in [MissedRun::Skip, MissedRun::RunOnce] {
-                                    ui.selectable_value(&mut self.missed, m, missed_label(m));
-                                }
-                            });
-                        ui.end_row();
-                    }
-
-                    ui.label("Action");
-                    egui::ComboBox::from_id_salt("action_kind")
-                        .selected_text(action_label(self.action))
-                        .show_ui(ui, |ui| {
-                            for kind in [ActionKind::Start, ActionKind::Stop, ActionKind::Restart, ActionKind::Run] {
-                                ui.selectable_value(&mut self.action, kind, action_label(kind));
-                            }
-                        });
-                    ui.end_row();
-                    if self.action == ActionKind::Run {
-                        ui.label("Program");
-                        ui.add(egui::TextEdit::singleline(&mut self.program).hint_text("Full path to the executable").desired_width(f32::INFINITY));
-                        ui.end_row();
-                        ui.label("Arguments");
-                        ui.add(egui::TextEdit::multiline(&mut self.args).hint_text("One argument per line").desired_rows(2).code_editor().desired_width(f32::INFINITY));
-                        ui.end_row();
-                        ui.label("Working directory");
-                        ui.add(egui::TextEdit::singleline(&mut self.cwd).hint_text("Optional").desired_width(f32::INFINITY));
-                        ui.end_row();
-                        ui.label("Time limit");
-                        ui.add(egui::DragValue::new(&mut self.timeout).range(1..=86_400).suffix(" s"));
-                        ui.end_row();
-                    } else {
-                        ui.label("Application");
-                        let name = self
-                            .app
-                            .as_ref()
-                            .and_then(|id| snapshot.spec(id))
-                            .map_or("choose…", |a| a.name.as_str());
-                        egui::ComboBox::from_id_salt("schedule_app")
-                            .selected_text(name)
-                            .show_ui(ui, |ui| {
-                                for app in &snapshot.apps {
-                                    ui.selectable_value(&mut self.app, Some(app.id.clone()), &app.name);
-                                }
-                            });
-                        ui.end_row();
-                    }
-                });
-
-            for error in &self.errors {
-                ui.colored_label(ui.visuals().error_fg_color, error);
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(if self.is_new {
+                    "Add schedule"
+                } else {
+                    "Edit schedule"
+                })
+                .text_style(egui::TextStyle::Heading),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::primary_button(ui, true, icons::SAVE, "Save").clicked() {
                     match self.build() {
                         Ok(spec) => action = EditorAction::Save(Box::new(spec)),
                         Err(errors) => self.errors = errors,
@@ -667,6 +636,109 @@ impl ScheduleEditor {
                 }
             });
         });
+        ui.add_space(8.0);
+        form::errors(ui, &self.errors);
+
+        egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+            form::section(ui, "Schedule", None, |ui| {
+                form::row(ui, "Name", None, |ui| form::text(ui, &mut self.name, "e.g. Nightly restart"));
+                form::row(ui, "Enabled", None, |ui| {
+                    ui.checkbox(&mut self.enabled, "Run on this timetable");
+                });
+            });
+
+            form::section(ui, "When", None, |ui| {
+                form::row(ui, "Repeat", None, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for kind in [WhenKind::Once, WhenKind::Daily, WhenKind::Weekly, WhenKind::Interval, WhenKind::AfterBoot] {
+                            ui.selectable_value(&mut self.when, kind, when_label(kind));
+                        }
+                    });
+                });
+                match self.when {
+                    WhenKind::Once => form::row(ui, "Date and time", Some("YYYY-MM-DD HH:MM"), |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.date_time).hint_text("2026-12-24 20:00").desired_width(180.0));
+                    }),
+                    WhenKind::Daily => form::row(ui, "Time", Some("24-hour clock, HH:MM"), |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.time).hint_text("09:30").desired_width(80.0));
+                    }),
+                    WhenKind::Weekly => {
+                        form::row(ui, "Days", None, |ui| {
+                            ui.horizontal(|ui| {
+                                for (i, day) in Day::ALL.iter().enumerate() {
+                                    ui.toggle_value(&mut self.days[i], day_label(*day));
+                                }
+                            });
+                        });
+                        form::row(ui, "Time", Some("24-hour clock, HH:MM"), |ui| {
+                            ui.add(egui::TextEdit::singleline(&mut self.time).hint_text("09:30").desired_width(80.0));
+                        });
+                    }
+                    WhenKind::Interval => form::row(ui, "Every", Some("Counted from the previous run."), |ui| {
+                        form::seconds(ui, &mut self.every, 1..=31_536_000)
+                    }),
+                    WhenKind::AfterBoot => form::row(ui, "Delay after boot", Some("Runs once per boot of the computer."), |ui| {
+                        form::seconds(ui, &mut self.boot_delay, 0..=86_400)
+                    }),
+                }
+                if !matches!(self.when, WhenKind::Interval | WhenKind::AfterBoot) {
+                    form::row(ui, "Time zone", Some("IANA name such as Asia/Tokyo; empty for the system time zone."), |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.time_zone).hint_text("system").desired_width(220.0));
+                    });
+                }
+                if self.when != WhenKind::AfterBoot {
+                    form::row(ui, "Missed runs", Some("Runs due while Gravekeeper was not running or the computer was asleep."), |ui| {
+                        ui.horizontal(|ui| {
+                            for m in [MissedRun::Skip, MissedRun::RunOnce] {
+                                ui.selectable_value(&mut self.missed, m, missed_label(m));
+                            }
+                        });
+                    });
+                }
+            });
+
+            form::section(ui, "Action", None, |ui| {
+                form::row(ui, "Do", None, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for kind in [ActionKind::Start, ActionKind::Stop, ActionKind::Restart, ActionKind::Run] {
+                            ui.selectable_value(&mut self.action, kind, action_label(kind));
+                        }
+                    });
+                });
+                if self.action == ActionKind::Run {
+                    form::row(ui, "Program", Some("Run directly, not through a shell."), |ui| {
+                        form::path(ui, &mut self.program, "/path/to/program", &mut self.picker, Field::Program, Kind::File);
+                    });
+                    form::row(ui, "Arguments", Some("One argument per line."), |ui| {
+                        form::lines(ui, &mut self.args, "--all")
+                    });
+                    form::row(ui, "Working directory", Some("Optional."), |ui| {
+                        form::path(ui, &mut self.cwd, "optional", &mut self.picker, Field::Cwd, Kind::Folder);
+                    });
+                    form::row(ui, "Time limit", Some("Stopped if it runs longer."), |ui| {
+                        form::seconds(ui, &mut self.timeout, 1..=86_400)
+                    });
+                } else {
+                    form::labelled_row(ui, "Application", None, |ui, label| {
+                        let name = self
+                            .app
+                            .as_ref()
+                            .and_then(|id| snapshot.spec(id))
+                            .map_or("Choose…", |a| a.name.as_str());
+                        egui::ComboBox::from_id_salt("schedule_app")
+                            .width(240.0)
+                            .selected_text(name)
+                            .show_ui(ui, |ui| {
+                                for app in &snapshot.apps {
+                                    ui.selectable_value(&mut self.app, Some(app.id.clone()), &app.name);
+                                }
+                            })
+                            .response
+                            .labelled_by(label);
+                    });
+                }
+            });
+        });
         action
     }
 }
@@ -674,25 +746,25 @@ impl ScheduleEditor {
 fn when_label(kind: WhenKind) -> &'static str {
     match kind {
         WhenKind::Once => "Once",
-        WhenKind::Daily => "Every day",
-        WhenKind::Weekly => "On days of the week",
-        WhenKind::Interval => "At an interval",
-        WhenKind::AfterBoot => "After the computer starts",
+        WhenKind::Daily => "Daily",
+        WhenKind::Weekly => "Weekly",
+        WhenKind::Interval => "Interval",
+        WhenKind::AfterBoot => "After boot",
     }
 }
 
 fn action_label(kind: ActionKind) -> &'static str {
     match kind {
-        ActionKind::Start => "Start an application",
-        ActionKind::Stop => "Stop an application",
-        ActionKind::Restart => "Restart an application",
-        ActionKind::Run => "Run a program",
+        ActionKind::Start => "Start app",
+        ActionKind::Stop => "Stop app",
+        ActionKind::Restart => "Restart app",
+        ActionKind::Run => "Run program",
     }
 }
 
 fn missed_label(missed: MissedRun) -> &'static str {
     match missed {
-        MissedRun::Skip => "Skip them",
+        MissedRun::Skip => "Skip",
         MissedRun::RunOnce => "Run once when possible",
     }
 }

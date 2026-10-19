@@ -6,6 +6,9 @@ use std::time::Duration;
 use eframe::egui;
 use gravekeeper_core::config::{self, AppId, AppSpec, RestartMode};
 
+use super::picker::{Kind, Picker};
+use super::{form, icons, widgets};
+
 /// Text fields are kept as strings so half-typed input is not lost or rejected mid-edit.
 pub struct Editor {
     id: AppId,
@@ -28,6 +31,7 @@ pub struct Editor {
     window: u64,
     stable_after: u64,
     errors: Vec<String>,
+    picker: Picker<Field>,
 }
 
 pub enum EditorAction {
@@ -75,6 +79,7 @@ impl Editor {
             window: r.window.as_secs(),
             stable_after: r.stable_after.as_secs(),
             errors: Vec::new(),
+            picker: Picker::default(),
         }
     }
 
@@ -136,89 +141,17 @@ impl Editor {
 
     pub fn show(&mut self, ui: &mut egui::Ui, other_names: &[&str]) -> EditorAction {
         let mut action = EditorAction::None;
-        ui.heading(if self.is_new {
-            "Add application"
-        } else {
-            "Edit application"
-        });
-        ui.add_space(4.0);
-
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            section(ui, "Command", |ui| {
-                text_row(ui, "Name", &mut self.name, "e.g. Web server");
-                text_row(
-                    ui,
-                    "Program",
-                    &mut self.program,
-                    "Full path to the executable",
-                );
-                multiline_row(ui, "Arguments", &mut self.args, "One argument per line");
-                text_row(ui, "Working directory", &mut self.cwd, "Optional");
-                multiline_row(ui, "Environment", &mut self.env, "KEY=VALUE, one per line");
-            });
+        ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("The program is run directly, not through a shell.").weak(),
+                egui::RichText::new(if self.is_new {
+                    "Add application"
+                } else {
+                    "Edit application"
+                })
+                .text_style(egui::TextStyle::Heading),
             );
-
-            section(ui, "Startup", |ui| {
-                ui.label("Enabled");
-                ui.checkbox(&mut self.enabled, "Allow this application to run");
-                ui.end_row();
-                ui.label("Start automatically");
-                ui.checkbox(&mut self.autostart, "When Gravekeeper starts");
-                ui.end_row();
-                secs_row(ui, "Start delay", &mut self.start_delay);
-                ui.label("Wait for system uptime").on_hover_text(
-                    "Do not start automatically before the computer has been up this long",
-                );
-                ui.add(
-                    egui::DragValue::new(&mut self.boot_delay)
-                        .range(0..=86_400)
-                        .suffix(" s"),
-                );
-                ui.end_row();
-                secs_row(ui, "Startup grace", &mut self.startup_grace);
-                secs_row(ui, "Stop timeout", &mut self.stop_timeout);
-            });
-
-            section(ui, "Restart policy", |ui| {
-                ui.label("Restart");
-                egui::ComboBox::from_id_salt("restart_mode")
-                    .selected_text(mode_label(self.mode))
-                    .show_ui(ui, |ui| {
-                        for mode in [
-                            RestartMode::OnFailure,
-                            RestartMode::Always,
-                            RestartMode::Never,
-                        ] {
-                            ui.selectable_value(&mut self.mode, mode, mode_label(mode));
-                        }
-                    });
-                ui.end_row();
-                if self.mode != RestartMode::Never {
-                    secs_row(ui, "First delay", &mut self.backoff_initial);
-                    secs_row(ui, "Maximum delay", &mut self.backoff_max);
-                    ui.label("Give up after");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut self.max_restarts).range(0..=1000));
-                        ui.label("restarts within");
-                        ui.add(
-                            egui::DragValue::new(&mut self.window)
-                                .range(1..=86_400)
-                                .suffix(" s"),
-                        );
-                    });
-                    ui.end_row();
-                    secs_row(ui, "Reset after running", &mut self.stable_after);
-                }
-            });
-
-            for error in &self.errors {
-                ui.colored_label(ui.visuals().error_fg_color, error);
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::primary_button(ui, true, icons::SAVE, "Save").clicked() {
                     match self.build(other_names) {
                         Ok(spec) => action = EditorAction::Save(Box::new(spec)),
                         Err(errors) => self.errors = errors,
@@ -228,61 +161,173 @@ impl Editor {
                     action = EditorAction::Cancel;
                 }
             });
-            if !self.is_new {
-                ui.label(
-                    egui::RichText::new("Changes apply the next time the application starts.")
-                        .weak(),
-                );
-            }
         });
+        if !self.is_new {
+            widgets::hint(ui, "Changes apply the next time the application starts.");
+        }
+        ui.add_space(8.0);
+        form::errors(ui, &self.errors);
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                form::section(
+                    ui,
+                    "Program",
+                    Some("Run directly, not through a shell."),
+                    |ui| {
+                        form::row(ui, "Executable", None, |ui| {
+                            let picked = form::path(
+                                ui,
+                                &mut self.program,
+                                "/path/to/program",
+                                &mut self.picker,
+                                Field::Program,
+                                Kind::File,
+                            );
+                            if picked && self.name.trim().is_empty() {
+                                self.name = name_from_path(&self.program);
+                            }
+                        });
+                        form::row(ui, "Name", None, |ui| {
+                            form::text(ui, &mut self.name, "e.g. Web server")
+                        });
+                        form::row(ui, "Arguments", Some("One argument per line."), |ui| {
+                            form::lines(ui, &mut self.args, "--port\n8080")
+                        });
+                        form::row(
+                            ui,
+                            "Working directory",
+                            Some("Optional; defaults to Gravekeeper's own."),
+                            |ui| {
+                                form::path(
+                                    ui,
+                                    &mut self.cwd,
+                                    "optional",
+                                    &mut self.picker,
+                                    Field::Cwd,
+                                    Kind::Folder,
+                                );
+                            },
+                        );
+                        form::row(
+                            ui,
+                            "Environment",
+                            Some("KEY=VALUE, one per line; added to the inherited environment."),
+                            |ui| form::lines(ui, &mut self.env, "RUST_LOG=info"),
+                        );
+                    },
+                );
+
+                form::section(ui, "Startup", None, |ui| {
+                    form::row(ui, "Enabled", None, |ui| {
+                        ui.checkbox(&mut self.enabled, "Allow this application to run");
+                    });
+                    form::row(ui, "Start automatically", None, |ui| {
+                        ui.checkbox(&mut self.autostart, "When Gravekeeper starts");
+                    });
+                    if self.autostart {
+                        form::row(
+                            ui,
+                            "Start delay",
+                            Some("Wait after Gravekeeper starts."),
+                            |ui| form::seconds(ui, &mut self.start_delay, 0..=86_400),
+                        );
+                        form::row(
+                            ui,
+                            "Wait for system uptime",
+                            Some("Not before the computer has been up this long."),
+                            |ui| form::seconds(ui, &mut self.boot_delay, 0..=86_400),
+                        );
+                    }
+                    form::row(
+                        ui,
+                        "Startup grace",
+                        Some("Exiting sooner counts as a failed start."),
+                        |ui| form::seconds(ui, &mut self.startup_grace, 0..=86_400),
+                    );
+                    form::row(
+                        ui,
+                        "Stop timeout",
+                        Some("Killed if still running this long after a stop request."),
+                        |ui| form::seconds(ui, &mut self.stop_timeout, 0..=86_400),
+                    );
+                });
+
+                form::section(ui, "When it exits", None, |ui| {
+                    form::labelled_row(ui, "Restart", None, |ui, label| {
+                        egui::ComboBox::from_id_salt("restart_mode")
+                            .width(220.0)
+                            .selected_text(mode_label(self.mode))
+                            .show_ui(ui, |ui| {
+                                for mode in [
+                                    RestartMode::OnFailure,
+                                    RestartMode::Always,
+                                    RestartMode::Never,
+                                ] {
+                                    ui.selectable_value(&mut self.mode, mode, mode_label(mode));
+                                }
+                            })
+                            .response
+                            .labelled_by(label);
+                    });
+                    if self.mode != RestartMode::Never {
+                        form::row(
+                            ui,
+                            "First delay",
+                            Some("Doubled after each consecutive failure."),
+                            |ui| form::seconds(ui, &mut self.backoff_initial, 1..=86_400),
+                        );
+                        form::row(ui, "Maximum delay", None, |ui| {
+                            form::seconds(ui, &mut self.backoff_max, 1..=86_400)
+                        });
+                        form::row(ui, "Give up after", None, |ui| {
+                            ui.horizontal(|ui| {
+                                form::number(
+                                    ui,
+                                    egui::DragValue::new(&mut self.max_restarts).range(0..=1000),
+                                );
+                                ui.label("restarts within");
+                                form::number(
+                                    ui,
+                                    egui::DragValue::new(&mut self.window).range(1..=86_400),
+                                );
+                                ui.label("seconds");
+                            });
+                        });
+                        form::row(
+                            ui,
+                            "Reset after running",
+                            Some("A run this long clears the failure count."),
+                            |ui| form::seconds(ui, &mut self.stable_after, 0..=86_400),
+                        );
+                    }
+                });
+            });
         action
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Program,
+    Cwd,
+}
+
+/// A readable name from an executable path: `/usr/bin/my-server` → `my-server`.
+fn name_from_path(path: &str) -> String {
+    std::path::Path::new(path.trim())
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 fn mode_label(mode: RestartMode) -> &'static str {
     match mode {
-        RestartMode::OnFailure => "On failure",
+        RestartMode::OnFailure => "On failure (non-zero exit)",
         RestartMode::Always => "Always",
         RestartMode::Never => "Never",
     }
-}
-
-fn section(ui: &mut egui::Ui, title: &str, rows: impl FnOnce(&mut egui::Ui)) {
-    ui.add_space(6.0);
-    ui.strong(title);
-    egui::Grid::new(title)
-        .num_columns(2)
-        .spacing([12.0, 6.0])
-        .min_col_width(130.0)
-        .show(ui, rows);
-}
-
-fn text_row(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
-    ui.label(label);
-    ui.add(
-        egui::TextEdit::singleline(value)
-            .hint_text(hint)
-            .desired_width(f32::INFINITY),
-    );
-    ui.end_row();
-}
-
-fn multiline_row(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
-    ui.label(label);
-    ui.add(
-        egui::TextEdit::multiline(value)
-            .hint_text(hint)
-            .desired_rows(3)
-            .code_editor()
-            .desired_width(f32::INFINITY),
-    );
-    ui.end_row();
-}
-
-fn secs_row(ui: &mut egui::Ui, label: &str, value: &mut u64) {
-    ui.label(label);
-    ui.add(egui::DragValue::new(value).range(0..=86_400).suffix(" s"));
-    ui.end_row();
 }
 
 #[cfg(test)]
@@ -297,6 +342,12 @@ mod tests {
         spec.cwd = Some("/srv".into());
         let built = Editor::from_spec(&spec).build(&[]).unwrap();
         assert_eq!(built, spec);
+    }
+
+    #[test]
+    fn names_come_from_the_executable() {
+        assert_eq!(name_from_path("/usr/bin/my-server"), "my-server");
+        assert_eq!(name_from_path("  ./run.sh  "), "run");
     }
 
     #[test]

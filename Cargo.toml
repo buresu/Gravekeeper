@@ -18,6 +18,8 @@ libc = "0.2"
 process-wrap = { version = "10", default-features = false }
 # rustls with the OS certificate store; no OpenSSL needed.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
+# Native file dialogs; on Linux through the XDG desktop portal (no GTK).
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

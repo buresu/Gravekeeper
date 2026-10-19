@@ -2,13 +2,14 @@
 
 use std::collections::BTreeMap;
 
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Margin, RichText};
 use gravekeeper_core::api::EventKind;
 use gravekeeper_core::config::{AppId, Secret};
 use gravekeeper_core::webhook::{self, PayloadFormat, WebhookId, WebhookSpec};
 use gravekeeper_core::{Command, CoreHandle, Snapshot};
 
-use super::widgets::format_time;
+use super::widgets::{self, format_relative, format_time};
+use super::{form, icons, theme};
 
 #[derive(Default)]
 pub struct WebhooksView {
@@ -29,81 +30,154 @@ impl WebhooksView {
         self.selected.as_ref()
     }
 
+    fn start_adding(&mut self) {
+        let editor = WebhookEditor::from_spec(&WebhookSpec::new("", ""), true);
+        self.selected = Some(editor.id.clone());
+        self.editor = Some(editor);
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui, core: &CoreHandle, snapshot: &Snapshot) {
         let editable = snapshot.config_error.is_none();
+        if self.editor.is_none()
+            && !self
+                .selected
+                .as_ref()
+                .is_some_and(|id| snapshot.config.webhooks.iter().any(|w| &w.id == id))
+        {
+            self.selected = snapshot.config.webhooks.first().map(|w| w.id.clone());
+        }
+
+        widgets::page_header(
+            ui,
+            "Notifications",
+            Some(
+                "Send crashes, failed schedules and resource alerts to chat or any HTTP endpoint.",
+            ),
+            |ui| {
+                if widgets::primary_button(ui, editable, icons::PLUS, "Add webhook").clicked() {
+                    self.start_adding();
+                }
+            },
+        );
+
+        if snapshot.config.webhooks.is_empty() && self.editor.is_none() {
+            if widgets::empty_state(
+                ui,
+                icons::BELL,
+                "No webhooks yet",
+                "Slack, Discord and plain JSON endpoints are supported.",
+                editable.then_some((icons::PLUS, "Add webhook")),
+            ) {
+                self.start_adding();
+            }
+            self.confirm_removal(ui, core);
+            return;
+        }
+
+        let p = theme::palette(ui);
         egui::Panel::left("webhook_list")
             .resizable(true)
-            .default_size(220.0)
-            .min_size(160.0)
+            .default_size(260.0)
+            .min_size(200.0)
+            .show_separator_line(false)
+            .frame(egui::Frame::new().inner_margin(Margin {
+                right: 16,
+                ..Margin::ZERO
+            }))
             .show(ui, |ui| {
-                ui.add_space(4.0);
-                if ui
-                    .add_enabled(editable, egui::Button::new("Add webhook"))
-                    .clicked()
-                {
-                    let editor = WebhookEditor::from_spec(&WebhookSpec::new("", ""), true);
-                    self.selected = Some(editor.id.clone());
-                    self.editor = Some(editor);
-                }
-                ui.separator();
-                for hook in &snapshot.config.webhooks {
-                    let selected = self.selected.as_ref() == Some(&hook.id);
-                    let text = if hook.enabled {
-                        RichText::new(&hook.name)
-                    } else {
-                        RichText::new(&hook.name).weak()
-                    };
-                    if ui.selectable_label(selected, text).clicked() {
-                        self.selected = Some(hook.id.clone());
-                        self.editor = None;
+                widgets::card(ui, |ui| {
+                    for hook in &snapshot.config.webhooks {
+                        let selected = self.selected.as_ref() == Some(&hook.id)
+                            && !self.editor.as_ref().is_some_and(|e| e.is_new);
+                        let failed = last_result(snapshot, hook).is_some_and(|(ok, _)| !ok);
+                        let response = widgets::list_row(
+                            ui,
+                            ("webhook", &hook.id),
+                            &hook.name,
+                            selected,
+                            |ui| {
+                                ui.horizontal(|ui| {
+                                    let (icon, color) = if failed {
+                                        (icons::WARNING_CIRCLE, p.danger)
+                                    } else if hook.enabled {
+                                        (icons::BELL, p.accent)
+                                    } else {
+                                        (icons::BELL, p.neutral)
+                                    };
+                                    ui.label(RichText::new(icon).color(color));
+                                    let name = RichText::new(&hook.name).strong();
+                                    ui.label(if hook.enabled {
+                                        name
+                                    } else {
+                                        name.color(p.text_weak)
+                                    });
+                                });
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} · {} events",
+                                        format_label(hook.format),
+                                        hook.events.len()
+                                    ))
+                                    .small()
+                                    .color(p.text_weak),
+                                );
+                            },
+                        );
+                        if response.clicked() {
+                            self.selected = Some(hook.id.clone());
+                            self.editor = None;
+                        }
                     }
+                });
+            });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new())
+            .show(ui, |ui| {
+                if let Some(editor) = &mut self.editor {
+                    match editor.show(ui, snapshot) {
+                        EditorAction::None => {}
+                        EditorAction::Cancel => self.editor = None,
+                        EditorAction::Save(spec) => {
+                            self.selected = Some(spec.id.clone());
+                            core.send(Command::SaveWebhook(spec));
+                            self.editor = None;
+                        }
+                    }
+                } else if let Some(hook) = self
+                    .selected
+                    .as_ref()
+                    .and_then(|id| snapshot.config.webhooks.iter().find(|w| &w.id == id))
+                {
+                    self.details(ui, core, snapshot, hook);
                 }
             });
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(editor) = &mut self.editor {
-                match editor.show(ui, snapshot) {
-                    EditorAction::None => {}
-                    EditorAction::Cancel => self.editor = None,
-                    EditorAction::Save(spec) => {
-                        self.selected = Some(spec.id.clone());
-                        core.send(Command::SaveWebhook(spec));
-                        self.editor = None;
-                    }
-                }
-            } else if let Some(hook) = self
-                .selected
-                .as_ref()
-                .and_then(|id| snapshot.config.webhooks.iter().find(|w| &w.id == id))
-            {
-                self.details(ui, core, snapshot, hook);
-            } else if snapshot.config.webhooks.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.label("No webhooks yet. Add one to be notified of crashes, failed schedules and resource alerts.");
-                });
-            } else {
-                ui.centered_and_justified(|ui| ui.label("Select a webhook."));
-            }
-        });
+        self.confirm_removal(ui, core);
+    }
 
-        if let Some(id) = self.confirm_remove.clone() {
-            let modal =
-                egui::Modal::new(egui::Id::unique("confirm_remove_webhook")).show(ui.ctx(), |ui| {
-                    ui.heading("Remove webhook?");
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Remove").clicked() {
-                            core.send(Command::RemoveWebhook(id.clone()));
-                            self.confirm_remove = None;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.confirm_remove = None;
-                        }
-                    });
+    fn confirm_removal(&mut self, ui: &mut egui::Ui, core: &CoreHandle) {
+        let Some(id) = self.confirm_remove.clone() else {
+            return;
+        };
+        let modal =
+            egui::Modal::new(egui::Id::unique("confirm_remove_webhook")).show(ui.ctx(), |ui| {
+                ui.set_max_width(400.0);
+                widgets::section_title(ui, "Remove webhook?");
+                ui.label("No more notifications will be sent to it.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if widgets::danger_button(ui, true, icons::TRASH, "Remove").clicked() {
+                        core.send(Command::RemoveWebhook(id.clone()));
+                        self.confirm_remove = None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_remove = None;
+                    }
                 });
-            if modal.should_close() {
-                self.confirm_remove = None;
-            }
+            });
+        if modal.should_close() {
+            self.confirm_remove = None;
         }
     }
 
@@ -114,48 +188,42 @@ impl WebhooksView {
         snapshot: &Snapshot,
         hook: &WebhookSpec,
     ) {
+        let p = theme::palette(ui);
         let editable = snapshot.config_error.is_none();
-        ui.heading(&hook.name);
-        ui.horizontal(|ui| {
-            if ui
-                .button("Send test")
-                .on_hover_text("The result appears below and in Events")
-                .clicked()
-            {
-                core.send(Command::TestWebhook(hook.id.clone()));
-            }
-            if ui
-                .add_enabled(editable, egui::Button::new("Edit"))
-                .clicked()
-            {
-                self.editor = Some(WebhookEditor::from_spec(hook, false));
-            }
-            if ui
-                .add_enabled(editable, egui::Button::new("Remove"))
-                .clicked()
-            {
-                self.confirm_remove = Some(hook.id.clone());
-            }
-        });
-        ui.add_space(4.0);
-        egui::Grid::new("webhook_status")
-            .num_columns(2)
-            .spacing([16.0, 4.0])
-            .show(ui, |ui| {
-                ui.label("Status");
-                ui.label(if hook.enabled { "enabled" } else { "disabled" });
+        widgets::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&hook.name).text_style(egui::TextStyle::Heading));
+                if !hook.enabled {
+                    widgets::pill(ui, "Disabled", p.neutral);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::danger_button(ui, editable, icons::TRASH, "")
+                        .on_hover_text("Remove")
+                        .clicked()
+                    {
+                        self.confirm_remove = Some(hook.id.clone());
+                    }
+                    if widgets::button(ui, editable, icons::EDIT, "Edit").clicked() {
+                        self.editor = Some(WebhookEditor::from_spec(hook, false));
+                    }
+                    if widgets::primary_button(ui, true, icons::SEND, "Send test")
+                        .on_hover_text("The result appears below and in Events")
+                        .clicked()
+                    {
+                        core.send(Command::TestWebhook(hook.id.clone()));
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            widgets::properties(ui, "webhook_status", |ui| {
+                widgets::property_label(ui, "URL");
+                ui.label(RichText::new(masked_url(hook.url.expose())).monospace())
+                    .on_hover_text("The rest of the URL is hidden; edit to see it.");
                 ui.end_row();
-                ui.label("URL");
-                ui.label(masked_url(hook.url.expose()));
-                ui.end_row();
-                ui.label("Format");
+                widgets::property_label(ui, "Format");
                 ui.label(format_label(hook.format));
                 ui.end_row();
-                ui.label("Events");
-                let events: Vec<_> = hook.events.iter().map(|k| event_label(*k)).collect();
-                ui.label(events.join(", "));
-                ui.end_row();
-                ui.label("Applications");
+                widgets::property_label(ui, "Applications");
                 ui.label(if hook.apps.is_empty() {
                     "all".to_owned()
                 } else {
@@ -166,34 +234,64 @@ impl WebhooksView {
                         .join(", ")
                 });
                 ui.end_row();
+                if let Some((ok, event)) = last_result(snapshot, hook) {
+                    widgets::property_label(ui, "Last result");
+                    ui.horizontal(|ui| {
+                        if ok {
+                            widgets::pill(
+                                ui,
+                                &widgets::icon_text(icons::CHECK, "Delivered"),
+                                p.success,
+                            );
+                        } else {
+                            widgets::pill(
+                                ui,
+                                &widgets::icon_text(icons::ERROR, "Failed"),
+                                p.danger,
+                            );
+                        }
+                        let prefix = format!("{}: ", hook.name);
+                        let message = event
+                            .message
+                            .strip_prefix(&prefix)
+                            .unwrap_or(&event.message);
+                        ui.label(RichText::new(format_relative(event.at)).color(p.text_weak))
+                            .on_hover_text(format_time(event.at));
+                        ui.add(egui::Label::new(message).truncate())
+                            .on_hover_text(message);
+                    });
+                    ui.end_row();
+                }
             });
-
-        // Recent delivery problems for this webhook (events do not carry the webhook id).
-        let prefix = format!("{}: ", hook.name);
-        let recent: Vec<_> = snapshot
-            .events
-            .iter()
-            .rev()
-            .filter(|e| {
-                matches!(
-                    e.kind,
-                    EventKind::WebhookFailed | EventKind::WebhookDelivered
-                ) && e.message.starts_with(&prefix)
-            })
-            .take(5)
-            .collect();
-        if !recent.is_empty() {
-            ui.separator();
-            ui.strong("Recent results");
-            for event in recent {
-                ui.label(format!(
-                    "{} — {}",
-                    format_time(event.at),
-                    &event.message[prefix.len()..]
-                ));
-            }
-        }
+            ui.add_space(6.0);
+            widgets::property_label(ui, "Sends");
+            ui.horizontal_wrapped(|ui| {
+                for kind in &hook.events {
+                    widgets::pill(ui, event_label(*kind), p.accent);
+                }
+            });
+        });
     }
+}
+
+/// The latest test or failure result of a webhook (events do not carry the webhook id, so
+/// they are matched by the name prefix).
+fn last_result<'a>(
+    snapshot: &'a Snapshot,
+    hook: &WebhookSpec,
+) -> Option<(bool, &'a gravekeeper_core::api::Event)> {
+    let prefix = format!("{}: ", hook.name);
+    snapshot
+        .events
+        .iter()
+        .rev()
+        .find(|e| {
+            matches!(
+                e.kind,
+                EventKind::WebhookFailed | EventKind::WebhookDelivered
+            ) && e.message.starts_with(&prefix)
+        })
+        .map(|e| (e.kind == EventKind::WebhookDelivered, e))
 }
 
 /// Shows only the scheme and host, e.g. `https://hooks.slack.com/…`.
@@ -316,94 +414,17 @@ impl WebhookEditor {
 
     fn show(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) -> EditorAction {
         let mut action = EditorAction::None;
-        ui.heading(if self.is_new {
-            "Add webhook"
-        } else {
-            "Edit webhook"
-        });
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("webhook_editor")
-                .num_columns(2)
-                .spacing([12.0, 6.0])
-                .min_col_width(130.0)
-                .show(ui, |ui| {
-                    ui.label("Name");
-                    ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("e.g. Ops channel"));
-                    ui.end_row();
-                    ui.label("Enabled");
-                    ui.checkbox(&mut self.enabled, "Send notifications");
-                    ui.end_row();
-                    ui.label("URL");
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.url)
-                                .password(!self.show_secrets)
-                                .hint_text("https://…")
-                                .desired_width(360.0),
-                        );
-                        ui.checkbox(&mut self.show_secrets, "Show");
-                    });
-                    ui.end_row();
-                    ui.label("Headers");
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.headers)
-                            .password(!self.show_secrets)
-                            .hint_text("Authorization: Bearer …")
-                            .desired_rows(2)
-                            .desired_width(360.0),
-                    );
-                    ui.end_row();
-                    ui.label("Format");
-                    egui::ComboBox::from_id_salt("webhook_format")
-                        .selected_text(format_label(self.format))
-                        .show_ui(ui, |ui| {
-                            for f in [PayloadFormat::Json, PayloadFormat::Slack, PayloadFormat::Discord] {
-                                ui.selectable_value(&mut self.format, f, format_label(f));
-                            }
-                        });
-                    ui.end_row();
-                    ui.label("Events");
-                    ui.vertical(|ui| {
-                        for kind in webhook::NOTIFIABLE {
-                            let mut on = self.events.contains(kind);
-                            if ui.checkbox(&mut on, event_label(*kind)).changed() {
-                                if on {
-                                    self.events.push(*kind);
-                                } else {
-                                    self.events.retain(|k| k != kind);
-                                }
-                            }
-                        }
-                    });
-                    ui.end_row();
-                    ui.label("Applications");
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("None checked means all").weak());
-                        for app in &snapshot.apps {
-                            let mut on = self.apps.contains(&app.id);
-                            if ui.checkbox(&mut on, &app.name).changed() {
-                                if on {
-                                    self.apps.push(app.id.clone());
-                                } else {
-                                    self.apps.retain(|id| id != &app.id);
-                                }
-                            }
-                        }
-                    });
-                    ui.end_row();
-                });
+        ui.horizontal(|ui| {
             ui.label(
-                RichText::new(
-                    "The URL and headers are stored in the configuration file (readable only by you on Linux and macOS) and never written to logs.",
-                )
-                .weak(),
+                RichText::new(if self.is_new {
+                    "Add webhook"
+                } else {
+                    "Edit webhook"
+                })
+                .text_style(egui::TextStyle::Heading),
             );
-            for error in &self.errors {
-                ui.colored_label(ui.visuals().error_fg_color, error);
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::primary_button(ui, true, icons::SAVE, "Save").clicked() {
                     match self.build() {
                         Ok(spec) => action = EditorAction::Save(Box::new(spec)),
                         Err(errors) => self.errors = errors,
@@ -414,6 +435,112 @@ impl WebhookEditor {
                 }
             });
         });
+        ui.add_space(8.0);
+        form::errors(ui, &self.errors);
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                form::section(
+                    ui,
+                    "Endpoint",
+                    Some("The URL and headers are kept out of logs and the event history."),
+                    |ui| {
+                        form::row(ui, "Name", None, |ui| {
+                            form::text(ui, &mut self.name, "e.g. Ops channel")
+                        });
+                        form::row(ui, "Enabled", None, |ui| {
+                            ui.checkbox(&mut self.enabled, "Send notifications");
+                        });
+                        form::row(ui, "URL", None, |ui| {
+                            ui.horizontal(|ui| {
+                                let icon = if self.show_secrets {
+                                    icons::EYE_SLASH
+                                } else {
+                                    icons::EYE
+                                };
+                                if ui
+                                    .button(icon)
+                                    .on_hover_text(if self.show_secrets { "Hide" } else { "Show" })
+                                    .clicked()
+                                {
+                                    self.show_secrets = !self.show_secrets;
+                                }
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.url)
+                                        .password(!self.show_secrets)
+                                        .hint_text("https://…")
+                                        .desired_width(ui.available_width()),
+                                );
+                            });
+                        });
+                        form::row(ui, "Format", None, |ui| {
+                            ui.horizontal(|ui| {
+                                for f in [
+                                    PayloadFormat::Json,
+                                    PayloadFormat::Slack,
+                                    PayloadFormat::Discord,
+                                ] {
+                                    ui.selectable_value(&mut self.format, f, format_label(f));
+                                }
+                            });
+                        });
+                        form::row(
+                            ui,
+                            "Headers",
+                            Some("Name: value, one per line (e.g. Authorization)."),
+                            |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.headers)
+                                        .password(!self.show_secrets)
+                                        .hint_text("Authorization: Bearer …")
+                                        .desired_rows(2)
+                                        .desired_width(f32::INFINITY),
+                                );
+                            },
+                        );
+                    },
+                );
+
+                form::section(ui, "What to send", None, |ui| {
+                    form::row(ui, "Events", None, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for kind in webhook::NOTIFIABLE {
+                                let mut on = self.events.contains(kind);
+                                if ui.toggle_value(&mut on, event_label(*kind)).changed() {
+                                    if on {
+                                        self.events.push(*kind);
+                                    } else {
+                                        self.events.retain(|k| k != kind);
+                                    }
+                                }
+                            }
+                        });
+                    });
+                    form::row(
+                        ui,
+                        "Applications",
+                        Some("None selected means all applications."),
+                        |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                for app in &snapshot.apps {
+                                    let mut on = self.apps.contains(&app.id);
+                                    if ui.toggle_value(&mut on, &app.name).changed() {
+                                        if on {
+                                            self.apps.push(app.id.clone());
+                                        } else {
+                                            self.apps.retain(|id| id != &app.id);
+                                        }
+                                    }
+                                }
+                                if snapshot.apps.is_empty() {
+                                    widgets::hint(ui, "No applications yet.");
+                                }
+                            });
+                        },
+                    );
+                });
+            });
         action
     }
 }

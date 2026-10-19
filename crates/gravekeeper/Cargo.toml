@@ -11,6 +11,7 @@ publish.workspace = true
 gravekeeper-core.workspace = true
 eframe = { workspace = true, features = ["default_fonts", "system_fonts", "wayland", "x11", "persistence"] }
 jiff.workspace = true
+rfd.workspace = true
 serde.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter", "ansi"] }
@@ -28,6 +29,8 @@ libc.workspace = true
 windows-registry.workspace = true
 
 [dev-dependencies]
+# Headless rendering of the UI for interaction tests and screenshots.
+egui_kittest = { version = "0.37", features = ["eframe", "wgpu", "snapshot"] }
 png = "0.18"
 tempfile.workspace = true
 toml.workspace = true

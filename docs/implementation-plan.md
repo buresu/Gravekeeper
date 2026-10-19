@@ -14,7 +14,7 @@ This document tracks what is done, what is not, and known issues for each phase.
 
 | Purpose | Crate | Reason |
 |---|---|---|
-| GUI | eframe / egui 0.37 (glow renderer) | Requirement. glow is smaller and starts faster than wgpu ([Phase 0 report](phase0-report.md)) |
+| GUI | eframe / egui 0.37 (glow renderer), rfd (file dialogs), egui_kittest (tests) | Requirement. glow is smaller and starts faster than wgpu ([Phase 0 report](phase0-report.md)) |
 | Tray | tray-icon 0.26 (`ksni` feature) | Same API on all three OSes; on Linux it uses D-Bus (StatusNotifierItem) and needs no GTK |
 | Processes | process-wrap 10 | Process groups / Job Objects / KillOnDrop behind one API |
 | Async | tokio 1 | Process waiting, timers, HTTP. Used only inside the engine |
@@ -117,6 +117,17 @@ See [phase0-report.md](phase0-report.md) for details.
 - **Linux packages target Ubuntu 22.04's glibc** in CI so the `.deb` and AppImage run on older distributions too.
 - **Releases are drafts** until published by hand.
 - **Icons are generated, not drawn by hand**, from the same code as the window icon, and committed so packaging needs no extra tool.
+
+## Usability pass (between Phase 3 and 4) — done
+
+Requested before Phase 4: native file dialogs and a less dated look.
+
+- [x] **Native file and folder dialogs** (rfd; XDG desktop portal on Linux, no GTK) for programs and working directories in the application and schedule editors; picking a program fills in an empty name
+- [x] **"Open folder" buttons** for the configuration, log files, backups and an application's log
+- [x] **New layout**: sidebar navigation with problem badges, page headers with the main action, master–detail pages with cards, status pills, empty states with a call to action, grouped forms with help text
+- [x] **Theme**: bundled Noto Sans (regular and semibold) and Phosphor icons, both subset to a few dozen KB; higher-contrast text; tuned light and dark palettes; System / Light / Dark choice in Settings
+- [x] **Accessibility**: every control has an accessible name (enforced by the GUI tests); status dots are drawn instead of relying on a glyph that Noto Sans lacks
+- [x] **GUI tests** with egui_kittest, and on-demand screenshots of every page
 
 ## Phase 4: Extensions
 

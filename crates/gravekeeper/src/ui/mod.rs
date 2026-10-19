@@ -2,21 +2,27 @@ mod apps;
 mod dashboard;
 mod editor;
 mod events;
+mod form;
+pub mod icons;
 mod logview;
+mod picker;
 mod schedules;
+#[cfg(test)]
+mod screenshots;
 mod settings;
+pub mod theme;
 mod webhooks;
 mod widgets;
 
 use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, ViewportCommand};
+use eframe::egui::{self, Margin, RichText, ViewportCommand};
 use gravekeeper_core::api::AppState;
 use gravekeeper_core::config::AppId;
 use gravekeeper_core::schedule::ScheduleId;
 use gravekeeper_core::webhook::WebhookId;
-use gravekeeper_core::{Command, CoreHandle};
+use gravekeeper_core::{Command, CoreHandle, Snapshot};
 use serde::{Deserialize, Serialize};
 
 use crate::shell::{CloseBehavior, Shell};
@@ -24,7 +30,7 @@ use crate::shell::{CloseBehavior, Shell};
 const STORAGE_KEY: &str = "gravekeeper.ui";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-enum Tab {
+pub enum Tab {
     #[default]
     Dashboard,
     Apps,
@@ -45,7 +51,7 @@ struct Persisted {
 }
 
 pub struct GravekeeperApp<'a> {
-    shell: Arc<Shell>,
+    shell: Option<Arc<Shell>>,
     core: &'a CoreHandle,
     close: CloseBehavior,
     process_started: Instant,
@@ -56,6 +62,7 @@ pub struct GravekeeperApp<'a> {
     events: events::EventsView,
     settings: settings::SettingsView,
     confirm_quit: bool,
+    logo: Option<egui::TextureHandle>,
 }
 
 /// The startup time is only meaningful for the first window of the process.
@@ -69,42 +76,71 @@ impl<'a> GravekeeperApp<'a> {
         close: CloseBehavior,
         process_started: Instant,
     ) -> Self {
+        theme::install(&cc.egui_ctx);
         let persisted: Persisted = cc
             .storage
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
             .unwrap_or_default();
-        let mut apps = apps::AppsView::default();
-        apps.selected = persisted.selected;
+        let mut app = Self::detached(core, close, process_started);
+        app.shell = Some(shell);
+        app.restore(persisted);
+        app
+    }
+
+    /// Without a window shell (no tray, no viewport commands); also used by rendering tests.
+    fn detached(core: &'a CoreHandle, close: CloseBehavior, process_started: Instant) -> Self {
         Self {
-            shell,
+            shell: None,
             core,
             close,
             process_started,
-            tab: persisted.tab,
-            apps,
-            schedules: schedules::SchedulesView::with_selection(persisted.schedule),
-            webhooks: webhooks::WebhooksView::with_selection(persisted.webhook),
+            tab: Tab::default(),
+            apps: apps::AppsView::default(),
+            schedules: schedules::SchedulesView::default(),
+            webhooks: webhooks::WebhooksView::default(),
             events: events::EventsView::default(),
             settings: settings::SettingsView::default(),
             confirm_quit: false,
+            logo: None,
         }
     }
 
+    fn restore(&mut self, persisted: Persisted) {
+        self.tab = persisted.tab;
+        self.apps.selected = persisted.selected;
+        self.schedules = schedules::SchedulesView::with_selection(persisted.schedule);
+        self.webhooks = webhooks::WebhooksView::with_selection(persisted.webhook);
+    }
+
+    #[cfg(test)]
+    pub fn set_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+    }
+
+    fn quit_requested(&self) -> bool {
+        self.shell.as_ref().is_some_and(|s| s.quit_requested())
+    }
+
     fn quit(&mut self, ctx: &egui::Context) {
-        self.shell.request_quit();
+        if let Some(shell) = &self.shell {
+            shell.request_quit();
+        }
         ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 
     fn confirm_quit(&mut self, ctx: &egui::Context, running: usize) {
         let modal = egui::Modal::new(egui::Id::unique("confirm_quit")).show(ctx, |ui| {
-            ui.heading("Quit Gravekeeper?");
+            ui.set_max_width(420.0);
+            widgets::section_title(ui, "Quit Gravekeeper?");
             ui.label(format!(
                 "{running} running application(s) will be stopped. To keep them supervised, \
                  close the window instead; Gravekeeper keeps running in the tray."
             ));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Quit and stop applications").clicked() {
+                if widgets::danger_button(ui, true, icons::POWER, "Quit and stop applications")
+                    .clicked()
+                {
                     self.confirm_quit = false;
                     self.quit(ui.ctx());
                 }
@@ -117,12 +153,105 @@ impl<'a> GravekeeperApp<'a> {
             self.confirm_quit = false;
         }
     }
+
+    fn sidebar(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot, running: usize) {
+        let p = theme::palette(ui);
+        let logo = self
+            .logo
+            .get_or_insert_with(|| {
+                ui.ctx().load_texture(
+                    "logo",
+                    egui::ColorImage::from_rgba_unmultiplied([64, 64], &crate::icon::rgba(64)),
+                    egui::TextureOptions::LINEAR,
+                )
+            })
+            .clone();
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(28.0, 28.0)));
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Gravekeeper").text_style(egui::TextStyle::Heading));
+                ui.label(
+                    RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                        .small()
+                        .color(p.text_weak),
+                );
+            });
+        });
+        ui.add_space(14.0);
+
+        let gave_up = snapshot
+            .apps
+            .iter()
+            .filter(|a| a.state == AppState::GaveUp)
+            .count();
+        let failed_schedules = snapshot
+            .schedules
+            .iter()
+            .filter(|s| {
+                s.last_run
+                    .as_ref()
+                    .is_some_and(|r| r.success == Some(false))
+            })
+            .count();
+        for (tab, icon, label, badge) in [
+            (Tab::Dashboard, icons::DASHBOARD, "Dashboard", 0),
+            (Tab::Apps, icons::APPS, "Applications", gave_up),
+            (
+                Tab::Schedules,
+                icons::CALENDAR,
+                "Schedules",
+                failed_schedules,
+            ),
+            (Tab::Notifications, icons::BELL, "Notifications", 0),
+            (Tab::Events, icons::LIST, "Events", 0),
+            (Tab::Settings, icons::GEAR, "Settings", 0),
+        ] {
+            if widgets::nav_item(ui, icon, label, self.tab == tab, badge).clicked() {
+                self.tab = tab;
+            }
+        }
+
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if widgets::button(ui, true, icons::POWER, "Quit")
+                    .on_hover_text("Stop all applications and exit")
+                    .clicked()
+                {
+                    if running > 0 {
+                        self.confirm_quit = true;
+                    } else {
+                        self.quit(ui.ctx());
+                    }
+                }
+                if self.close != CloseBehavior::Quit
+                    && widgets::button(ui, true, icons::TRAY, "Hide")
+                        .on_hover_text("Close the window; applications stay supervised")
+                        .clicked()
+                {
+                    ui.send_viewport_cmd(ViewportCommand::Close);
+                }
+            });
+            ui.add_space(4.0);
+            let (color, text) = if running > 0 {
+                (p.success, format!("Supervising {running} application(s)"))
+            } else {
+                (p.neutral, "Nothing running".to_owned())
+            };
+            ui.horizontal(|ui| {
+                widgets::dot(ui, color);
+                ui.label(RichText::new(text).small().color(color));
+            });
+            ui.separator();
+        });
+    }
 }
 
 impl eframe::App for GravekeeperApp<'_> {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let close_requested = ctx.input(|i| i.viewport().close_requested());
-        if !close_requested || self.shell.quit_requested() {
+        if !close_requested || self.quit_requested() {
             return;
         }
         match self.close {
@@ -132,7 +261,11 @@ impl eframe::App for GravekeeperApp<'_> {
                 ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             }
             CloseBehavior::Destroy => tracing::info!("window closed; staying in tray"),
-            CloseBehavior::Quit => self.shell.request_quit(),
+            CloseBehavior::Quit => {
+                if let Some(shell) = &self.shell {
+                    shell.request_quit();
+                }
+            }
         }
     }
 
@@ -150,74 +283,61 @@ impl eframe::App for GravekeeperApp<'_> {
             .filter(|a| a.state.is_active() || a.state == AppState::Backoff)
             .count();
 
-        egui::Panel::top("tabs").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.strong("Gravekeeper");
-                ui.separator();
-                for (tab, label) in [
-                    (Tab::Dashboard, "Dashboard"),
-                    (Tab::Apps, "Applications"),
-                    (Tab::Schedules, "Schedules"),
-                    (Tab::Notifications, "Notifications"),
-                    (Tab::Events, "Events"),
-                    (Tab::Settings, "Settings"),
-                ] {
-                    ui.selectable_value(&mut self.tab, tab, label);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Quit").clicked() {
-                        if running > 0 {
-                            self.confirm_quit = true;
-                        } else {
-                            self.quit(ui.ctx());
-                        }
-                    }
-                    if self.close != CloseBehavior::Quit
-                        && ui
-                            .button("Close to tray")
-                            .on_hover_text("Applications stay supervised")
-                            .clicked()
-                    {
-                        ui.send_viewport_cmd(ViewportCommand::Close);
-                    }
-                });
-            });
-        });
+        let p = theme::palette(ui);
+        egui::Panel::left("nav")
+            .exact_size(210.0)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(p.sidebar)
+                    .inner_margin(Margin::symmetric(12, 14)),
+            )
+            .show(ui, |ui| self.sidebar(ui, &snapshot, running));
 
-        if let Some(error) = &snapshot.config_error {
-            egui::Panel::top("config_error").show(ui, |ui| {
-                let color = ui.visuals().error_fg_color;
-                widgets::banner(ui, color, |ui| {
-                    ui.strong("The configuration file could not be loaded. Changes are disabled until it is fixed.");
-                    ui.label(error);
-                    ui.horizontal(|ui| {
-                        ui.monospace(snapshot.config_path.display().to_string());
-                        if ui.button("Reload").clicked() {
-                            self.core.send(Command::ReloadConfig);
-                        }
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(Margin::symmetric(24, 20)),
+            )
+            .show(ui, |ui| {
+                if let Some(error) = &snapshot.config_error {
+                    widgets::banner(ui, p.danger, |ui| {
+                        ui.label(
+                            RichText::new(widgets::icon_text(
+                                icons::WARNING_CIRCLE,
+                                "The configuration file could not be loaded. Changes are disabled until it is fixed.",
+                            ))
+                            .strong()
+                            .color(p.danger),
+                        );
+                        ui.label(error);
+                        ui.horizontal(|ui| {
+                            if widgets::button(ui, true, icons::RELOAD, "Reload").clicked() {
+                                self.core.send(Command::ReloadConfig);
+                            }
+                            if widgets::button(ui, true, icons::FOLDER_OPEN, "Show file").clicked() {
+                                picker::reveal(&snapshot.config_path);
+                            }
+                        });
                     });
-                });
-            });
-        }
-
-        match self.tab {
-            Tab::Apps => self.apps.show(ui, self.core, &snapshot),
-            Tab::Schedules => self.schedules.show(ui, self.core, &snapshot),
-            Tab::Notifications => self.webhooks.show(ui, self.core, &snapshot),
-            tab => {
-                egui::CentralPanel::default().show(ui, |ui| match tab {
+                    ui.add_space(12.0);
+                }
+                match self.tab {
                     Tab::Dashboard => {
                         if let Some(id) = dashboard::show(ui, &snapshot) {
                             self.apps.select(id);
                             self.tab = Tab::Apps;
                         }
                     }
+                    Tab::Apps => self.apps.show(ui, self.core, &snapshot),
+                    Tab::Schedules => self.schedules.show(ui, self.core, &snapshot),
+                    Tab::Notifications => self.webhooks.show(ui, self.core, &snapshot),
                     Tab::Events => self.events.show(ui, &snapshot),
                     Tab::Settings => self.settings.show(ui, self.core, &snapshot),
-                    Tab::Apps | Tab::Schedules | Tab::Notifications => unreachable!(),
-                });
-            }
-        }
+                }
+            });
 
         if self.confirm_quit {
             self.confirm_quit(ui.ctx(), running);
@@ -243,13 +363,22 @@ pub struct AlreadyRunning;
 
 impl eframe::App for AlreadyRunning {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading("Gravekeeper is already running");
-            ui.label("Open it from its icon in the system tray. If it runs as a background service (gravekeeper service status), stop the service to use the window.");
-            ui.add_space(8.0);
-            if ui.button("OK").clicked() {
-                ui.send_viewport_cmd(ViewportCommand::Close);
-            }
-        });
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(Margin::same(20)),
+            )
+            .show(ui, |ui| {
+                widgets::section_title(ui, "Gravekeeper is already running");
+                ui.label(
+                    "Open it from its icon in the system tray. If it runs as a background service \
+                     (gravekeeper service status), stop the service to use the window.",
+                );
+                ui.add_space(8.0);
+                if ui.button("OK").clicked() {
+                    ui.send_viewport_cmd(ViewportCommand::Close);
+                }
+            });
     }
 }

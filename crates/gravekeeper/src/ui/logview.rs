@@ -1,12 +1,12 @@
 //! Output viewer for applications and schedules, fetched incrementally from the engine.
 
 use std::collections::VecDeque;
+use std::path::Path;
 
-use eframe::egui::{self, RichText};
-use gravekeeper_core::api::AppState;
+use eframe::egui::{self, CornerRadius, Margin, RichText};
 use gravekeeper_core::process::{LogLine, Stream};
 
-use super::widgets;
+use super::{icons, picker, theme, widgets};
 
 /// The output of one application or schedule.
 pub struct LogView {
@@ -47,24 +47,36 @@ impl LogView {
         }
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui) {
+    /// `file` is the log file on disk, if output is also written there.
+    pub fn show(&mut self, ui: &mut egui::Ui, file: Option<&Path>) {
+        let p = theme::palette(ui);
         ui.horizontal(|ui| {
-            ui.strong("Output");
-            ui.checkbox(&mut self.stdout, "stdout");
-            ui.checkbox(&mut self.stderr, "stderr");
-            ui.checkbox(&mut self.meta, "events");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text("Filter")
-                    .desired_width(160.0),
-            );
-            if ui
-                .button("Clear")
-                .on_hover_text("Clears this view only")
-                .clicked()
-            {
-                self.lines.clear();
-            }
+            widgets::section_title(ui, &widgets::icon_text(icons::TERMINAL, "Output"));
+            ui.add_space(8.0);
+            ui.toggle_value(&mut self.stdout, "stdout");
+            ui.toggle_value(&mut self.stderr, RichText::new("stderr").color(p.warning));
+            ui.toggle_value(&mut self.meta, "events")
+                .on_hover_text("Starts, exits and restarts noted by Gravekeeper");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(file) = file
+                    && widgets::button(ui, true, icons::FOLDER_OPEN, "")
+                        .on_hover_text(format!("Open the log folder ({})", file.display()))
+                        .clicked()
+                {
+                    picker::reveal(file);
+                }
+                if widgets::button(ui, true, icons::CLEAR, "")
+                    .on_hover_text("Clear this view (the log file is kept)")
+                    .clicked()
+                {
+                    self.lines.clear();
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.filter)
+                        .hint_text(widgets::icon_text(icons::SEARCH, "Filter"))
+                        .desired_width(180.0),
+                );
+            });
         });
 
         let filter = self.filter.to_lowercase();
@@ -79,14 +91,25 @@ impl LogView {
             .filter(|l| filter.is_empty() || l.text.to_lowercase().contains(&filter))
             .collect();
 
-        let dark = ui.visuals().dark_mode;
-        let stderr_color = widgets::state_color(AppState::Backoff, dark);
-        let meta_color = ui.visuals().weak_text_color();
+        let meta_color = p.text_weak;
         let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
         egui::Frame::new()
-            .fill(ui.visuals().extreme_bg_color)
-            .inner_margin(4.0)
+            .fill(ui.visuals().code_bg_color)
+            .corner_radius(CornerRadius::same(6))
+            .inner_margin(Margin::symmetric(10, 8))
             .show(ui, |ui| {
+                if visible.is_empty() {
+                    ui.set_min_height(120.0);
+                    ui.label(
+                        RichText::new(if self.lines.is_empty() {
+                            "No output yet."
+                        } else {
+                            "No lines match the filter."
+                        })
+                        .color(p.text_weak),
+                    );
+                    return;
+                }
                 egui::ScrollArea::both()
                     .auto_shrink(false)
                     .stick_to_bottom(true)
@@ -95,7 +118,7 @@ impl LogView {
                             let text = RichText::new(&line.text).monospace();
                             let text = match line.stream {
                                 Stream::Stdout => text,
-                                Stream::Stderr => text.color(stderr_color),
+                                Stream::Stderr => text.color(p.warning),
                                 Stream::Meta => text.color(meta_color).italics(),
                             };
                             ui.add(egui::Label::new(text).extend());

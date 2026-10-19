@@ -1,0 +1,52 @@
+//! Phosphor icon code points (regular weight). Only these are in the bundled font subset;
+//! add a code point here *and* re-run the subset command in `assets/fonts/README.md`.
+#![allow(dead_code)]
+
+pub const DASHBOARD: &str = "\u{E464}"; // squares-four
+pub const APPS: &str = "\u{E5DA}"; // app-window
+pub const CALENDAR: &str = "\u{E10A}"; // calendar-blank
+pub const BELL: &str = "\u{E0CE}";
+pub const LIST: &str = "\u{E2F2}"; // list-bullets
+pub const GEAR: &str = "\u{E272}"; // gear-six
+pub const PLAY: &str = "\u{E3D0}";
+pub const STOP: &str = "\u{E46C}";
+pub const RESTART: &str = "\u{E036}"; // arrow-clockwise
+pub const PAUSE: &str = "\u{E39E}";
+pub const PLAY_PAUSE: &str = "\u{E8BE}";
+pub const EDIT: &str = "\u{E3B4}"; // pencil-simple
+pub const TRASH: &str = "\u{E4A6}";
+pub const PLUS: &str = "\u{E3D4}";
+pub const ARROW_UP: &str = "\u{E08E}";
+pub const ARROW_DOWN: &str = "\u{E03E}";
+pub const FOLDER_OPEN: &str = "\u{E256}";
+pub const FILE: &str = "\u{E230}";
+pub const CLOSE: &str = "\u{E4F6}"; // x
+pub const CHECK: &str = "\u{E182}";
+pub const CHECK_CIRCLE: &str = "\u{E184}";
+pub const WARNING: &str = "\u{E4E0}";
+pub const WARNING_CIRCLE: &str = "\u{E4E2}";
+pub const INFO: &str = "\u{E2CE}";
+pub const ERROR: &str = "\u{E4F8}"; // x-circle
+pub const CPU: &str = "\u{E610}";
+pub const MEMORY: &str = "\u{E9C4}";
+pub const DISK: &str = "\u{E2A0}"; // hard-drives
+pub const SEND: &str = "\u{E398}"; // paper-plane-tilt
+pub const SEARCH: &str = "\u{E30C}"; // magnifying-glass
+pub const POWER: &str = "\u{E3DA}";
+pub const SIGN_OUT: &str = "\u{E42A}";
+pub const TERMINAL: &str = "\u{EAE8}"; // terminal-window
+pub const EYE: &str = "\u{E220}";
+pub const EYE_SLASH: &str = "\u{E224}";
+pub const CLEAR: &str = "\u{EC54}"; // broom
+pub const RELOAD: &str = "\u{E094}"; // arrows-clockwise
+pub const ACTIVITY: &str = "\u{E2AC}"; // heartbeat
+pub const TIMER: &str = "\u{E492}";
+pub const CLOCK: &str = "\u{E19A}";
+pub const GHOST: &str = "\u{E62A}";
+pub const LIGHTNING: &str = "\u{E2DE}";
+pub const CARET_RIGHT: &str = "\u{E13A}";
+pub const TRAY: &str = "\u{E4AA}";
+pub const EXTERNAL: &str = "\u{E5DE}"; // arrow-square-out
+pub const COPY: &str = "\u{E1CA}";
+pub const SAVE: &str = "\u{E248}"; // floppy-disk
+pub const UNDO: &str = "\u{E038}"; // arrow-counter-clockwise

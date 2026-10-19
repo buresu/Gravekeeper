@@ -1,56 +1,334 @@
-//! Small display helpers shared by the views.
+//! Shared building blocks: cards, page headers, status pills, buttons, formatting.
 
 use std::time::{Duration, SystemTime};
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Stroke, TextStyle};
 use gravekeeper_core::api::{AppState, AppStatus, EventLevel};
 
-pub fn state_color(state: AppState, dark: bool) -> Color32 {
-    let (light, dark_c) = match state {
-        AppState::Running => (
-            Color32::from_rgb(0x1e, 0x8e, 0x3e),
-            Color32::from_rgb(0x5c, 0xd0, 0x7a),
-        ),
-        AppState::Starting | AppState::Waiting | AppState::Stopping => (
-            Color32::from_rgb(0x9a, 0x6b, 0x00),
-            Color32::from_rgb(0xe8, 0xc0, 0x4a),
-        ),
-        AppState::Backoff => (
-            Color32::from_rgb(0xc2, 0x5a, 0x00),
-            Color32::from_rgb(0xff, 0x9d, 0x4d),
-        ),
-        AppState::GaveUp => (
-            Color32::from_rgb(0xc5, 0x22, 0x1f),
-            Color32::from_rgb(0xff, 0x6b, 0x66),
-        ),
-        AppState::Stopped | AppState::Disabled => (Color32::GRAY, Color32::GRAY),
-    };
-    if dark { dark_c } else { light }
-}
+use super::icons;
+use super::theme::{self, Palette};
 
-pub fn level_color(level: EventLevel, dark: bool) -> Color32 {
-    match level {
-        EventLevel::Info => {
-            if dark {
-                Color32::LIGHT_GRAY
-            } else {
-                Color32::DARK_GRAY
-            }
+pub fn state_color(state: AppState, p: &Palette) -> Color32 {
+    match state {
+        AppState::Running => p.success,
+        AppState::Starting | AppState::Waiting | AppState::Stopping | AppState::Backoff => {
+            p.warning
         }
-        EventLevel::Warning => state_color(AppState::Backoff, dark),
-        EventLevel::Error => state_color(AppState::GaveUp, dark),
+        AppState::GaveUp => p.danger,
+        AppState::Stopped | AppState::Disabled => p.neutral,
     }
 }
 
-/// A colored dot followed by the state name.
-pub fn state_badge(ui: &mut egui::Ui, status: &AppStatus) {
-    let color = state_color(status.state, ui.visuals().dark_mode);
-    ui.label(RichText::new("●").color(color));
-    let mut label = status.state.label().to_owned();
-    if status.paused {
-        label.push_str(" (paused)");
+pub fn level_color(level: EventLevel, p: &Palette) -> Color32 {
+    match level {
+        EventLevel::Info => p.neutral,
+        EventLevel::Warning => p.warning,
+        EventLevel::Error => p.danger,
     }
-    ui.label(RichText::new(label).color(color));
+}
+
+pub fn level_label(level: EventLevel) -> &'static str {
+    match level {
+        EventLevel::Info => "Info",
+        EventLevel::Warning => "Warning",
+        EventLevel::Error => "Error",
+    }
+}
+
+/// `icon  text`, for buttons and labels.
+pub fn icon_text(icon: &str, text: &str) -> String {
+    if text.is_empty() {
+        icon.to_owned()
+    } else {
+        format!("{icon}  {text}")
+    }
+}
+
+/// A rounded, bordered surface for grouping content.
+pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let p = theme::palette(ui);
+    egui::Frame::new()
+        .fill(p.card)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::same(16))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// Page title with an optional subtitle, and actions aligned to the right.
+pub fn page_header(
+    ui: &mut egui::Ui,
+    title: &str,
+    subtitle: Option<&str>,
+    actions: impl FnOnce(&mut egui::Ui),
+) {
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(RichText::new(title).text_style(TextStyle::Name(theme::TITLE.into())));
+            if let Some(subtitle) = subtitle {
+                ui.label(RichText::new(subtitle).color(theme::palette(ui).text_weak));
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), actions);
+    });
+    ui.add_space(8.0);
+}
+
+pub fn section_title(ui: &mut egui::Ui, text: &str) {
+    ui.label(RichText::new(text).text_style(TextStyle::Name(theme::SECTION.into())));
+}
+
+/// Weak, small explanatory text.
+pub fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .small()
+            .color(theme::palette(ui).text_weak),
+    );
+}
+
+/// A small rounded label with a tinted background. Measured before it is placed, so it
+/// wraps correctly in `horizontal_wrapped` layouts.
+pub fn pill(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
+    let font = egui::FontId::new(11.5, egui::FontFamily::Name(theme::SEMIBOLD.into()));
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    let padding = egui::vec2(8.0, 3.0);
+    let (rect, response) =
+        ui.allocate_exact_size(galley.size() + 2.0 * padding, egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(10), color.gamma_multiply(0.16));
+        ui.painter().galley(rect.min + padding, galley, color);
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
+    response
+}
+
+/// A small filled circle, e.g. for status (drawn, so it needs no font glyph).
+pub fn dot(ui: &mut egui::Ui, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 4.0, color);
+}
+
+pub fn state_pill(ui: &mut egui::Ui, status: &AppStatus) {
+    let p = theme::palette(ui);
+    let color = state_color(status.state, &p);
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.16))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(8, 2))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.horizontal(|ui| {
+                dot(ui, color);
+                ui.label(
+                    RichText::new(status.state.label())
+                        .small()
+                        .strong()
+                        .color(color),
+                );
+            });
+        });
+    if status.paused {
+        pill(ui, &icon_text(icons::PAUSE, "Paused"), p.neutral);
+    }
+}
+
+/// A plain button with an icon.
+pub fn button(ui: &mut egui::Ui, enabled: bool, icon: &str, text: &str) -> egui::Response {
+    ui.add_enabled(enabled, egui::Button::new(icon_text(icon, text)))
+}
+
+/// The main action of a page, filled with the accent color.
+pub fn primary_button(ui: &mut egui::Ui, enabled: bool, icon: &str, text: &str) -> egui::Response {
+    let p = theme::palette(ui);
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(RichText::new(icon_text(icon, text)).color(Color32::WHITE))
+            .fill(p.accent),
+    )
+}
+
+/// A destructive action, with red text.
+pub fn danger_button(ui: &mut egui::Ui, enabled: bool, icon: &str, text: &str) -> egui::Response {
+    let p = theme::palette(ui);
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(RichText::new(icon_text(icon, text)).color(p.danger)),
+    )
+}
+
+/// A centered message for empty lists, with an optional call to action. Returns whether
+/// the action was clicked.
+pub fn empty_state(
+    ui: &mut egui::Ui,
+    icon: &str,
+    title: &str,
+    body: &str,
+    action: Option<(&str, &str)>,
+) -> bool {
+    let mut clicked = false;
+    ui.vertical_centered(|ui| {
+        ui.add_space((ui.available_height() * 0.25).max(24.0));
+        let p = theme::palette(ui);
+        ui.label(RichText::new(icon).size(40.0).color(p.text_weak));
+        ui.add_space(6.0);
+        ui.label(RichText::new(title).text_style(TextStyle::Name(theme::SECTION.into())));
+        ui.label(RichText::new(body).color(p.text_weak));
+        if let Some((icon, label)) = action {
+            ui.add_space(8.0);
+            clicked = primary_button(ui, true, icon, label).clicked();
+        }
+    });
+    clicked
+}
+
+/// A number with a label, for the dashboard.
+pub fn stat_tile(ui: &mut egui::Ui, icon: &str, label: &str, value: usize, color: Color32) {
+    let p = theme::palette(ui);
+    egui::Frame::new()
+        .fill(p.card)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(16, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(icon).size(22.0).color(color));
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(value.to_string()).size(24.0).strong());
+                    ui.label(RichText::new(label).color(p.text_weak));
+                });
+            });
+        });
+}
+
+/// A sidebar navigation entry.
+pub fn nav_item(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    selected: bool,
+    badge: usize,
+) -> egui::Response {
+    let p = theme::palette(ui);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::click());
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, CornerRadius::same(6), p.accent.gamma_multiply(0.18));
+    } else if response.hovered() {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(6),
+            ui.visuals().widgets.hovered.weak_bg_fill,
+        );
+    }
+    let color = if selected {
+        p.accent
+    } else {
+        ui.visuals().text_color()
+    };
+    painter.text(
+        rect.left_center() + egui::vec2(12.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        egui::FontId::proportional(17.0),
+        color,
+    );
+    painter.text(
+        rect.left_center() + egui::vec2(38.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(14.0),
+        color,
+    );
+    if badge > 0 {
+        let center = rect.right_center() - egui::vec2(18.0, 0.0);
+        painter.circle_filled(center, 9.0, p.danger);
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            badge.min(99).to_string(),
+            egui::FontId::proportional(11.0),
+            Color32::WHITE,
+        );
+    }
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, selected, label));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A selectable row in a list (applications, schedules, webhooks). `label` is what screen
+/// readers announce.
+pub fn list_row(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    label: &str,
+    selected: bool,
+    add: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+    let p = theme::palette(ui);
+    let fill = if selected {
+        p.accent.gamma_multiply(0.16)
+    } else {
+        Color32::TRANSPARENT
+    };
+    let inner = egui::Frame::new()
+        .fill(fill)
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(Margin::symmetric(10, 7))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui);
+        });
+    let rect = inner.response.rect;
+    let response = ui.interact(
+        rect,
+        egui::Id::unique(("list_row", id)),
+        egui::Sense::click(),
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::Role::ListItem, true, selected, label));
+    if response.hovered() && !selected {
+        ui.painter().rect_stroke(
+            rect,
+            CornerRadius::same(6),
+            Stroke::new(1.0, p.border),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A label/value grid.
+pub fn properties(ui: &mut egui::Ui, id: &str, rows: impl FnOnce(&mut egui::Ui)) {
+    egui::Grid::new(id)
+        .num_columns(2)
+        .spacing([20.0, 8.0])
+        .min_col_width(120.0)
+        .striped(false)
+        .show(ui, rows);
+}
+
+pub fn property_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(RichText::new(text).color(theme::palette(ui).text_weak));
+}
+
+/// A full-width colored box for problems that need the user's attention.
+pub fn banner(ui: &mut egui::Ui, color: Color32, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.12))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.6)))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui);
+        });
 }
 
 /// Local date and time, e.g. `2026-10-19 03:12:45`.
@@ -99,17 +377,11 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// A small line chart of percentages (0-100), oldest value on the left.
-pub fn sparkline(ui: &mut egui::Ui, values: &[f32], color: Color32) {
-    let size = egui::vec2(160.0, 36.0);
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+/// A small area chart of percentages (0-100), oldest value on the left.
+pub fn sparkline(ui: &mut egui::Ui, values: &[f32], color: Color32, width: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 40.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_stroke(
-        rect,
-        2.0,
-        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
-        egui::StrokeKind::Inside,
-    );
+    painter.rect_filled(rect, CornerRadius::same(4), color.gamma_multiply(0.06));
     if values.len() < 2 {
         return;
     }
@@ -122,20 +394,19 @@ pub fn sparkline(ui: &mut egui::Ui, values: &[f32], color: Color32) {
             egui::pos2(rect.left() + i as f32 * step, y)
         })
         .collect();
-    painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, color)));
+    painter.add(egui::Shape::line(points, Stroke::new(1.5, color)));
 }
 
-/// A full-width colored box for problems that need the user's attention.
-pub fn banner(ui: &mut egui::Ui, color: Color32, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.15))
-        .stroke(egui::Stroke::new(1.0, color))
-        .corner_radius(4.0)
-        .inner_margin(8.0)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            add(ui);
-        });
+/// A thin horizontal usage bar (0-100%).
+pub fn usage_bar(ui: &mut egui::Ui, percent: f32, color: Color32, width: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 8.0), egui::Sense::hover());
+    let p = theme::palette(ui);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(4), p.border);
+    let mut filled = rect;
+    filled.set_width(rect.width() * (percent / 100.0).clamp(0.0, 1.0));
+    ui.painter()
+        .rect_filled(filled, CornerRadius::same(4), color);
 }
 
 #[cfg(test)]

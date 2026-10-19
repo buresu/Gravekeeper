@@ -60,12 +60,19 @@ LIBSQLITE3_SYS_USE_PKG_CONFIG=1 SQLITE3_LIB_DIR=/nonexistent \
 | Unit | `#[cfg(test)]` in each module | Config parsing/validation/saving/migration, restart policy, schedule planning (DST, missed runs), thresholds, webhook filters and payloads, log rotation, history store, line splitting, exit classification, editors, autostart entry, formatting |
 | Process | `crates/gravekeeper-core/tests/process.rs` | Real processes: output capture, heavy output, stopping, stopping descendants, escalation to kill |
 | Operations | `crates/gravekeeper-core/tests/operations.rs` | Start order, reordering and backups, schedule runs (success, failure, time limit), interval schedules, missed-run catch-up across restarts, webhooks against a local HTTP server (retry, failure without URL, test message), log files, monitoring alerts and recovery |
+| GUI | `crates/gravekeeper/src/ui/screenshots.rs` | The real UI driven headlessly with egui_kittest: sidebar navigation reaches every page, the application editor validates input, the schedule editor opens; widgets without accessible names fail the test |
 | Headless | `crates/gravekeeper/tests/headless.rs` | The real binary: SIGTERM stops applications and exits cleanly, SIGHUP reloads, a second instance exits with code 3, children die with a SIGKILLed supervisor (Linux), CLI errors |
 | Engine | `crates/gravekeeper-core/tests/engine.rs` | The whole engine with real processes: autostart and delay, crash loop and give-up, on-failure policy, failed starts, pause, restart, output, spawn failure, editing/removing, broken config, single instance, history across restarts, shutdown |
 
 Integration tests use `gk-test-helper` (`crates/gravekeeper-core/src/bin/`) instead of shell commands, so the same tests run on every OS. The helper is not part of the product.
 
-There are no automated GUI tests. Window and tray behavior was checked with D-Bus and KWin scripts (see [phase0-report.md](phase0-report.md)); input into the window cannot be automated on KWin Wayland, so forms are checked by hand.
+GUI pages and forms are tested headlessly with egui_kittest (no window or GPU needed). To look at every page in both themes, render screenshots (needs a GPU or a software Vulkan/GL driver):
+
+```sh
+GRAVEKEEPER_SCREENSHOTS=target/screens cargo test -p gravekeeper screenshots -- --ignored
+```
+
+Window and tray behavior (closing to the tray, reopening) was checked with D-Bus and KWin scripts (see [phase0-report.md](phase0-report.md)). Native file dialogs open the real portal dialog and are checked by hand.
 
 To try the GUI without touching your real configuration:
 

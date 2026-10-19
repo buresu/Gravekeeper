@@ -1,10 +1,13 @@
-//! General, monitoring and logging settings.
+//! General, appearance, monitoring and logging settings.
 
-use eframe::egui::{self, RichText};
+use std::path::Path;
+
+use eframe::egui::{self, RichText, ThemePreference};
 use gravekeeper_core::config::{GeneralSettings, LoggingSettings};
 use gravekeeper_core::monitor::MonitoringSettings;
 use gravekeeper_core::{Command, CoreHandle, Snapshot};
 
+use super::{form, icons, picker, theme, widgets};
 use crate::autostart;
 
 #[derive(Default)]
@@ -44,208 +47,246 @@ impl SettingsView {
             _ => saved.clone(),
         };
         let base = saved.clone();
+        let changed = draft != saved;
         let mut reset = false;
+
+        widgets::page_header(ui, "Settings", None, |ui| {
+            if widgets::primary_button(ui, editable && changed, icons::SAVE, "Save changes")
+                .clicked()
+            {
+                if draft.general != saved.general {
+                    core.send(Command::SaveGeneral(draft.general.clone()));
+                }
+                if draft.monitoring != saved.monitoring {
+                    core.send(Command::SaveMonitoring(draft.monitoring.clone()));
+                }
+                if draft.logging != saved.logging {
+                    core.send(Command::SaveLogging(draft.logging.clone()));
+                }
+                reset = true;
+            }
+            if widgets::button(ui, changed, icons::UNDO, "Revert").clicked() {
+                reset = true;
+            }
+            if changed {
+                ui.label(RichText::new("Unsaved changes").color(theme::palette(ui).warning));
+            }
+        });
+        if let Some(error) = &self.error {
+            let color = theme::palette(ui).danger;
+            widgets::banner(ui, color, |ui| {
+                ui.label(RichText::new(error).color(color));
+            });
+            ui.add_space(8.0);
+        }
 
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
-                ui.add_enabled_ui(editable, |ui| {
-                    section(ui, "General", |ui| {
-                        ui.label("Launch at login");
-                        let launch = self
-                            .launch_at_login
-                            .get_or_insert_with(|| {
-                                autostart::is_enabled().map_err(|e| e.to_string())
-                            })
-                            .clone();
-                        match launch {
-                            Ok(mut enabled) => {
-                                if ui
-                                    .checkbox(
-                                        &mut enabled,
-                                        "Start Gravekeeper in the tray when I log in",
-                                    )
-                                    .changed()
-                                {
-                                    match autostart::set_enabled(enabled) {
-                                        Ok(()) => {
-                                            self.launch_at_login = Some(Ok(enabled));
-                                            self.error = None;
-                                        }
-                                        Err(err) => {
-                                            self.error =
-                                                Some(format!("Could not change login item: {err}"))
+                form::section(ui, "Startup", None, |ui| {
+                    form::row(
+                        ui,
+                        "Launch at login",
+                        Some("Starts Gravekeeper in the tray when you log in."),
+                        |ui| {
+                            let launch = self
+                                .launch_at_login
+                                .get_or_insert_with(|| {
+                                    autostart::is_enabled().map_err(|e| e.to_string())
+                                })
+                                .clone();
+                            match launch {
+                                Ok(mut enabled) => {
+                                    if ui.checkbox(&mut enabled, "Enabled").changed() {
+                                        match autostart::set_enabled(enabled) {
+                                            Ok(()) => {
+                                                self.launch_at_login = Some(Ok(enabled));
+                                                self.error = None;
+                                            }
+                                            Err(err) => {
+                                                self.error = Some(format!(
+                                                    "Could not change the login item: {err}"
+                                                ))
+                                            }
                                         }
                                     }
                                 }
+                                Err(err) => {
+                                    ui.label(format!("Unavailable: {err}"));
+                                }
                             }
-                            Err(err) => {
-                                ui.label(format!("Unavailable: {err}"));
-                            }
-                        }
-                        ui.end_row();
-                        ui.label("Start minimized");
-                        ui.checkbox(
-                            &mut draft.general.start_minimized,
-                            "Open only the tray icon at startup",
-                        );
-                        ui.end_row();
-                        ui.label("Output lines kept");
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::DragValue::new(&mut draft.general.log_lines)
-                                    .range(100..=200_000),
+                        },
+                    );
+                    form::row(
+                        ui,
+                        "Start minimized",
+                        Some("Open only the tray icon at startup."),
+                        |ui| {
+                            ui.add_enabled(
+                                editable,
+                                egui::Checkbox::new(&mut draft.general.start_minimized, "Enabled"),
                             );
-                            ui.label(
-                                RichText::new("per application in memory (after restart)").weak(),
-                            );
-                        });
-                        ui.end_row();
-                    });
+                        },
+                    );
+                });
 
-                    section(ui, "Resource monitoring", |ui| {
+                form::section(ui, "Appearance", None, |ui| {
+                    form::row(ui, "Theme", None, |ui| {
+                        let mut preference = ui.ctx().options(|o| o.theme_preference);
+                        let before = preference;
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut preference, ThemePreference::System, "System");
+                            ui.selectable_value(&mut preference, ThemePreference::Light, "Light");
+                            ui.selectable_value(&mut preference, ThemePreference::Dark, "Dark");
+                        });
+                        if preference != before {
+                            ui.ctx().set_theme(preference);
+                        }
+                    });
+                });
+
+                ui.add_enabled_ui(editable, |ui| {
+                    form::section(ui, "Resource monitoring", None, |ui| {
                         let m = &mut draft.monitoring;
-                        ui.label("Enabled");
-                        ui.checkbox(&mut m.enabled, "Measure CPU, memory and disks");
-                        ui.end_row();
-                        ui.label("Interval");
-                        secs(ui, &mut m.interval, 1..=3600);
-                        ui.end_row();
+                        form::row(ui, "Enabled", None, |ui| {
+                            ui.checkbox(&mut m.enabled, "Measure CPU, memory and disks");
+                        });
+                        form::row(ui, "Interval", None, |ui| {
+                            let mut secs = m.interval.as_secs();
+                            form::seconds(ui, &mut secs, 1..=3600);
+                            m.interval = std::time::Duration::from_secs(secs);
+                        });
                         for (label, value) in [
                             ("CPU alert", &mut m.cpu_alert),
                             ("Memory alert", &mut m.memory_alert),
                             ("Disk alert", &mut m.disk_alert),
                         ] {
-                            ui.label(label);
-                            ui.horizontal(|ui| {
-                                ui.add(egui::DragValue::new(value).range(0..=100).suffix(" %"));
-                                ui.label(
-                                    RichText::new(if *value == 0 { "off" } else { "at or above" })
-                                        .weak(),
+                            form::row(ui, label, None, |ui| {
+                                ui.horizontal(|ui| {
+                                    form::number(
+                                        ui,
+                                        egui::DragValue::new(value).range(0..=100).suffix(" %"),
+                                    );
+                                    widgets::hint(
+                                        ui,
+                                        if *value == 0 {
+                                            "off"
+                                        } else {
+                                            "alert at or above"
+                                        },
+                                    );
+                                });
+                            });
+                        }
+                        form::row(
+                            ui,
+                            "Sustained for",
+                            Some("A value must stay high this long before an alert."),
+                            |ui| {
+                                let mut secs = m.sustain.as_secs();
+                                form::seconds(ui, &mut secs, 0..=86_400);
+                                m.sustain = std::time::Duration::from_secs(secs);
+                            },
+                        );
+                    });
+
+                    form::section(
+                        ui,
+                        "Logs",
+                        Some("Log file settings apply after restarting Gravekeeper."),
+                        |ui| {
+                            form::row(ui, "Output kept in memory", None, |ui| {
+                                ui.horizontal(|ui| {
+                                    form::number(
+                                        ui,
+                                        egui::DragValue::new(&mut draft.general.log_lines)
+                                            .range(100..=200_000),
+                                    );
+                                    widgets::hint(ui, "lines per application");
+                                });
+                            });
+                            let l = &mut draft.logging;
+                            form::row(ui, "Log files", None, |ui| {
+                                ui.checkbox(
+                                    &mut l.app_log_files,
+                                    "Also write application output to files",
                                 );
                             });
-                            ui.end_row();
-                        }
-                        ui.label("Sustained for");
-                        secs(ui, &mut m.sustain, 0..=86_400);
-                        ui.end_row();
-                    });
-
-                    section(ui, "Log files", |ui| {
-                        let l = &mut draft.logging;
-                        ui.label("Application output");
-                        ui.checkbox(&mut l.app_log_files, "Also write output to files");
-                        ui.end_row();
-                        ui.label("Rotate at");
-                        ui.add(
-                            egui::DragValue::new(&mut l.max_file_mb)
-                                .range(1..=10_000)
-                                .suffix(" MiB"),
-                        );
-                        ui.end_row();
-                        ui.label("Keep");
-                        ui.add(
-                            egui::DragValue::new(&mut l.keep_files)
-                                .range(0..=100)
-                                .suffix(" old files"),
-                        );
-                        ui.end_row();
-                        ui.label("");
-                        ui.label(
-                            RichText::new("Log file settings apply after restarting Gravekeeper.")
-                                .weak(),
-                        );
-                        ui.end_row();
-                    });
+                            form::row(ui, "Rotate at", None, |ui| {
+                                form::number(
+                                    ui,
+                                    egui::DragValue::new(&mut l.max_file_mb)
+                                        .range(1..=10_000)
+                                        .suffix(" MiB"),
+                                );
+                            });
+                            form::row(ui, "Keep", None, |ui| {
+                                form::number(
+                                    ui,
+                                    egui::DragValue::new(&mut l.keep_files)
+                                        .range(0..=100)
+                                        .suffix(" old files"),
+                                );
+                            });
+                        },
+                    );
                 });
 
-                ui.add_space(8.0);
-                let changed = draft != saved;
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(editable && changed, egui::Button::new("Save changes"))
-                        .clicked()
-                    {
-                        if draft.general != saved.general {
-                            core.send(Command::SaveGeneral(draft.general.clone()));
-                        }
-                        if draft.monitoring != saved.monitoring {
-                            core.send(Command::SaveMonitoring(draft.monitoring.clone()));
-                        }
-                        if draft.logging != saved.logging {
-                            core.send(Command::SaveLogging(draft.logging.clone()));
-                        }
-                        reset = true;
-                    }
-                    if ui
-                        .add_enabled(changed, egui::Button::new("Revert"))
-                        .clicked()
-                    {
-                        reset = true;
-                    }
-                });
-                if let Some(error) = &self.error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                }
-
-                section(ui, "Files", |ui| {
-                    ui.label("Configuration");
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button("Reload")
+                form::section(ui, "Files", None, |ui| {
+                    file_row(ui, "Configuration", &snapshot.config_path, |ui| {
+                        if widgets::button(ui, true, icons::RELOAD, "Reload")
                             .on_hover_text("Re-read the file after editing it by hand")
                             .clicked()
                         {
                             core.send(Command::ReloadConfig);
                         }
-                        path(ui, &snapshot.config_path.display().to_string());
                     });
-                    ui.end_row();
-                    ui.label("Log files");
-                    path(ui, &snapshot.data_dir.join("logs").display().to_string());
-                    ui.end_row();
-                    ui.label("Config backups");
-                    path(ui, &snapshot.data_dir.join("backups").display().to_string());
-                    ui.end_row();
-                    ui.label("Event history");
-                    ui.label(if snapshot.history_available {
-                        "saved"
-                    } else {
-                        "unavailable (kept in memory only)"
+                    file_row(ui, "Log files", &snapshot.data_dir.join("logs"), |_| {});
+                    file_row(
+                        ui,
+                        "Configuration backups",
+                        &snapshot.data_dir.join("backups"),
+                        |_| {},
+                    );
+                    form::row(ui, "Event history", None, |ui| {
+                        ui.label(if snapshot.history_available {
+                            "saved in history.sqlite3"
+                        } else {
+                            "unavailable (kept in memory only)"
+                        });
                     });
-                    ui.end_row();
-                    ui.label("Version");
-                    ui.label(env!("CARGO_PKG_VERSION"));
-                    ui.end_row();
+                    form::row(ui, "Version", None, |ui| {
+                        ui.label(env!("CARGO_PKG_VERSION"));
+                    });
                 });
             });
+
         if !reset {
             self.draft = Some((draft, base));
         }
     }
 }
 
-fn section(ui: &mut egui::Ui, title: &str, rows: impl FnOnce(&mut egui::Ui)) {
-    ui.add_space(8.0);
-    ui.heading(title);
-    egui::Grid::new(title)
-        .num_columns(2)
-        .spacing([16.0, 8.0])
-        .min_col_width(160.0)
-        .show(ui, rows);
-}
-
-fn secs(ui: &mut egui::Ui, value: &mut std::time::Duration, range: std::ops::RangeInclusive<u64>) {
-    let mut s = value.as_secs();
-    if ui
-        .add(egui::DragValue::new(&mut s).range(range).suffix(" s"))
-        .changed()
-    {
-        *value = std::time::Duration::from_secs(s);
-    }
-}
-
-fn path(ui: &mut egui::Ui, path: &str) {
-    ui.add(egui::Label::new(RichText::new(path).monospace()).truncate())
-        .on_hover_text(path);
+fn file_row(ui: &mut egui::Ui, label: &str, path: &Path, extra: impl FnOnce(&mut egui::Ui)) {
+    form::row(ui, label, None, |ui| {
+        ui.horizontal(|ui| {
+            if widgets::button(ui, true, icons::FOLDER_OPEN, "Open")
+                .on_hover_text("Show in the file manager")
+                .clicked()
+            {
+                picker::reveal(path);
+            }
+            extra(ui);
+            let text = path.display().to_string();
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&text)
+                        .monospace()
+                        .color(theme::palette(ui).text_weak),
+                )
+                .truncate(),
+            )
+            .on_hover_text(&text);
+        });
+    });
 }
