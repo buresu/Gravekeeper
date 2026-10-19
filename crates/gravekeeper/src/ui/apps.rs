@@ -56,19 +56,6 @@ impl AppsView {
             }
         });
 
-        if snapshot.apps.is_empty() && self.editor.is_none() {
-            if widgets::empty_state(
-                ui,
-                icons::APPS,
-                "No applications yet",
-                "Add a program for Gravekeeper to start, watch and restart.",
-                editable.then_some((icons::PLUS, "Add application")),
-            ) {
-                self.start_adding();
-            }
-            return;
-        }
-
         let p = theme::palette(ui);
         egui::Panel::left("app_list")
             .resizable(true)
@@ -80,9 +67,12 @@ impl AppsView {
                 ..Margin::ZERO
             }))
             .show(ui, |ui| {
-                widgets::card(ui, |ui| {
+                widgets::card_fill(ui, |ui| {
+                    if snapshot.apps.is_empty() {
+                        widgets::hint(ui, "No applications yet.");
+                    }
                     egui::ScrollArea::vertical()
-                        .auto_shrink([false, true])
+                        .auto_shrink(false)
                         .show(ui, |ui| {
                             for status in &snapshot.apps {
                                 let selected = self.selected.as_ref() == Some(&status.id)
@@ -143,6 +133,16 @@ impl AppsView {
                 } else if let Some(status) = self.selected.as_ref().and_then(|id| snapshot.app(id))
                 {
                     self.details(ui, core, snapshot, status);
+                } else if snapshot.apps.is_empty()
+                    && widgets::empty_state(
+                        ui,
+                        icons::APPS,
+                        "No applications yet",
+                        "Add a program for Gravekeeper to start, watch and restart.",
+                        editable.then_some((icons::PLUS, "Add application")),
+                    )
+                {
+                    self.start_adding();
                 }
             });
 

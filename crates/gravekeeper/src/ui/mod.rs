@@ -213,9 +213,33 @@ impl<'a> GravekeeperApp<'a> {
         }
 
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            ui.add_space(4.0);
+            ui.add_space(2.0);
+            // Two equal buttons spanning the sidebar; Quit alone when there is no tray.
+            let can_hide = self.close != CloseBehavior::Quit;
+            let gap = ui.spacing().item_spacing.x;
+            let width = if can_hide {
+                (ui.available_width() - gap) / 2.0
+            } else {
+                ui.available_width()
+            };
+            let size = egui::vec2(width, 30.0);
             ui.horizontal(|ui| {
-                if widgets::button(ui, true, icons::POWER, "Quit")
+                if can_hide
+                    && ui
+                        .add_sized(
+                            size,
+                            egui::Button::new(widgets::icon_text(icons::TRAY, "Hide")),
+                        )
+                        .on_hover_text("Close the window; applications stay supervised")
+                        .clicked()
+                {
+                    ui.send_viewport_cmd(ViewportCommand::Close);
+                }
+                let quit = egui::Button::new(
+                    RichText::new(widgets::icon_text(icons::POWER, "Quit")).color(p.danger),
+                );
+                if ui
+                    .add_sized(size, quit)
                     .on_hover_text("Stop all applications and exit")
                     .clicked()
                 {
@@ -224,13 +248,6 @@ impl<'a> GravekeeperApp<'a> {
                     } else {
                         self.quit(ui.ctx());
                     }
-                }
-                if self.close != CloseBehavior::Quit
-                    && widgets::button(ui, true, icons::TRAY, "Hide")
-                        .on_hover_text("Close the window; applications stay supervised")
-                        .clicked()
-                {
-                    ui.send_viewport_cmd(ViewportCommand::Close);
                 }
             });
             ui.add_space(4.0);
@@ -243,6 +260,7 @@ impl<'a> GravekeeperApp<'a> {
                 widgets::dot(ui, color);
                 ui.label(RichText::new(text).small().color(color));
             });
+            ui.add_space(2.0);
             ui.separator();
         });
     }

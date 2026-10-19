@@ -107,27 +107,31 @@ pub fn path<T: Copy + PartialEq>(
         *value = path.to_string_lossy().into_owned();
         picked = true;
     }
+    let (label, title) = match kind {
+        Kind::File => ("Browse for a program", "Choose a program"),
+        Kind::Folder => ("Choose a folder", "Choose a folder"),
+    };
     ui.horizontal(|ui| {
-        let label = match kind {
-            Kind::File => "Browse…",
-            Kind::Folder => "Choose…",
-        };
-        let title = match kind {
-            Kind::File => "Choose a program",
-            Kind::Folder => "Choose a folder",
-        };
-        let button = widgets::button(ui, !picker.is_open(), icons::FOLDER_OPEN, label);
-        if button.clicked() {
-            let current = value.trim();
-            let start = (!current.is_empty()).then(|| Path::new(current));
-            picker.open(ui.ctx(), tag, kind, title, start);
-        }
-        ui.add(
-            egui::TextEdit::singleline(value)
-                .hint_text(hint)
-                .font(egui::TextStyle::Monospace)
-                .desired_width(ui.available_width()),
-        );
+        // Right to left: the icon button sits at the end, the field takes the rest.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let button = ui
+                .add_enabled(!picker.is_open(), egui::Button::new(icons::FOLDER_OPEN))
+                .on_hover_text(label);
+            button.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, !picker.is_open(), label)
+            });
+            if button.clicked() {
+                let current = value.trim();
+                let start = (!current.is_empty()).then(|| Path::new(current));
+                picker.open(ui.ctx(), tag, kind, title, start);
+            }
+            ui.add(
+                egui::TextEdit::singleline(value)
+                    .hint_text(hint)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(ui.available_width()),
+            );
+        });
     });
     if picker.is_open() {
         widgets::hint(ui, "Waiting for the file dialog…");

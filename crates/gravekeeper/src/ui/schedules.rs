@@ -62,20 +62,6 @@ impl SchedulesView {
             },
         );
 
-        if snapshot.schedules.is_empty() && self.editor.is_none() {
-            if widgets::empty_state(
-                ui,
-                icons::CALENDAR,
-                "No schedules yet",
-                "Restart something every night, run a cleanup every hour, or start a program after boot.",
-                editable.then_some((icons::PLUS, "Add schedule")),
-            ) {
-                self.start_adding(snapshot);
-            }
-            self.confirm_removal(ui, core);
-            return;
-        }
-
         let p = theme::palette(ui);
         egui::Panel::left("schedule_list")
             .resizable(true)
@@ -87,9 +73,12 @@ impl SchedulesView {
                 ..Margin::ZERO
             }))
             .show(ui, |ui| {
-                widgets::card(ui, |ui| {
+                widgets::card_fill(ui, |ui| {
+                    if snapshot.schedules.is_empty() {
+                        widgets::hint(ui, "No schedules yet.");
+                    }
                     egui::ScrollArea::vertical()
-                        .auto_shrink([false, true])
+                        .auto_shrink(false)
                         .show(ui, |ui| {
                             for status in &snapshot.schedules {
                                 let selected = self.selected.as_ref() == Some(&status.id)
@@ -157,6 +146,16 @@ impl SchedulesView {
                     .and_then(|id| snapshot.schedules.iter().find(|s| &s.id == id))
                 {
                     self.details(ui, core, snapshot, status);
+                } else if snapshot.schedules.is_empty()
+                    && widgets::empty_state(
+                        ui,
+                        icons::CALENDAR,
+                        "No schedules yet",
+                        "Restart something every night, run a cleanup every hour, or start a program after boot.",
+                        editable.then_some((icons::PLUS, "Add schedule")),
+                    )
+                {
+                    self.start_adding(snapshot);
                 }
             });
 

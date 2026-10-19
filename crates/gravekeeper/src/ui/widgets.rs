@@ -59,6 +59,51 @@ pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
+/// Cards side by side with equal heights: the contents are laid out first, then every
+/// card's background is painted down to the bottom of the tallest one.
+pub fn card_row(ui: &mut egui::Ui, cards: &mut [&mut dyn FnMut(&mut egui::Ui)]) {
+    let p = theme::palette(ui);
+    ui.columns(cards.len(), |cols| {
+        let mut placed = Vec::new();
+        for (col, add) in cols.iter_mut().zip(cards.iter_mut()) {
+            let background = col.painter().add(egui::Shape::Noop);
+            let rect = egui::Frame::new()
+                .inner_margin(Margin::same(16))
+                .show(col, |ui| {
+                    ui.set_width(ui.available_width());
+                    add(ui);
+                })
+                .response
+                .rect;
+            placed.push((col.painter().clone(), background, rect));
+        }
+        let bottom = placed
+            .iter()
+            .map(|(_, _, rect)| rect.bottom())
+            .fold(f32::MIN, f32::max);
+        for (painter, background, rect) in placed {
+            painter.set(
+                background,
+                egui::epaint::RectShape::new(
+                    rect.with_max_y(bottom),
+                    CornerRadius::same(10),
+                    p.card,
+                    Stroke::new(1.0, p.border),
+                    egui::StrokeKind::Inside,
+                ),
+            );
+        }
+    });
+}
+
+/// A card that fills the remaining height, so short or empty lists keep their shape.
+pub fn card_fill<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    card(ui, |ui| {
+        ui.set_min_height(ui.available_height());
+        add(ui)
+    })
+}
+
 /// Page title with an optional subtitle, and actions aligned to the right.
 pub fn page_header(
     ui: &mut egui::Ui,

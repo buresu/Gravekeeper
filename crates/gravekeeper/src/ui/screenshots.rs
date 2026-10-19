@@ -64,8 +64,12 @@ format = "slack"
 
 /// An engine with sample applications. Leaked: the UI borrows it for `'static`.
 fn sample_core() -> &'static CoreHandle {
+    core_with(CONFIG)
+}
+
+fn core_with(config: &str) -> &'static CoreHandle {
     let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
-    std::fs::write(dir.path().join("config.toml"), CONFIG).unwrap();
+    std::fs::write(dir.path().join("config.toml"), config).unwrap();
     let core = CoreHandle::start(Paths::in_dir(dir.path()), Arc::new(|| {})).unwrap();
     let core: &'static CoreHandle = Box::leak(Box::new(core));
     // Let autostarts settle and the first two resource samples arrive.
@@ -201,6 +205,17 @@ fn screenshots() {
             &mut harness,
             &out.join(format!("schedule-editor-{theme_name}.png")),
         );
+    }
+
+    // Empty lists keep the two-pane layout.
+    let empty = core_with("schema_version = 2\n[monitoring]\nenabled = false\n");
+    for (tab, name) in [
+        (Tab::Apps, "applications"),
+        (Tab::Schedules, "schedules"),
+        (Tab::Notifications, "notifications"),
+    ] {
+        let mut harness = open_ui(empty, tab, egui::Theme::Light, true);
+        save(&mut harness, &out.join(format!("{name}-empty.png")));
     }
 }
 

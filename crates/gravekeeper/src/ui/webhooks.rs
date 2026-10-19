@@ -60,20 +60,6 @@ impl WebhooksView {
             },
         );
 
-        if snapshot.config.webhooks.is_empty() && self.editor.is_none() {
-            if widgets::empty_state(
-                ui,
-                icons::BELL,
-                "No webhooks yet",
-                "Slack, Discord and plain JSON endpoints are supported.",
-                editable.then_some((icons::PLUS, "Add webhook")),
-            ) {
-                self.start_adding();
-            }
-            self.confirm_removal(ui, core);
-            return;
-        }
-
         let p = theme::palette(ui);
         egui::Panel::left("webhook_list")
             .resizable(true)
@@ -85,7 +71,10 @@ impl WebhooksView {
                 ..Margin::ZERO
             }))
             .show(ui, |ui| {
-                widgets::card(ui, |ui| {
+                widgets::card_fill(ui, |ui| {
+                    if snapshot.config.webhooks.is_empty() {
+                        widgets::hint(ui, "No webhooks yet.");
+                    }
                     for hook in &snapshot.config.webhooks {
                         let selected = self.selected.as_ref() == Some(&hook.id)
                             && !self.editor.as_ref().is_some_and(|e| e.is_new);
@@ -150,6 +139,16 @@ impl WebhooksView {
                     .and_then(|id| snapshot.config.webhooks.iter().find(|w| &w.id == id))
                 {
                     self.details(ui, core, snapshot, hook);
+                } else if snapshot.config.webhooks.is_empty()
+                    && widgets::empty_state(
+                        ui,
+                        icons::BELL,
+                        "No webhooks yet",
+                        "Slack, Discord and plain JSON endpoints are supported.",
+                        editable.then_some((icons::PLUS, "Add webhook")),
+                    )
+                {
+                    self.start_adding();
                 }
             });
 
@@ -439,7 +438,7 @@ impl WebhookEditor {
         form::errors(ui, &self.errors);
 
         egui::ScrollArea::vertical()
-            .auto_shrink([false, true])
+            .auto_shrink(false)
             .show(ui, |ui| {
                 form::section(
                     ui,

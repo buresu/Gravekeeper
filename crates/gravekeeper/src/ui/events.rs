@@ -1,6 +1,7 @@
 //! Event history.
 
 use eframe::egui::{self, RichText};
+use egui_extras::{Column, TableBuilder};
 use gravekeeper_core::Snapshot;
 use gravekeeper_core::api::{Event, EventLevel};
 use gravekeeper_core::config::AppId;
@@ -34,7 +35,7 @@ impl EventsView {
         };
         widgets::page_header(ui, "Events", Some(subtitle), |_| {});
 
-        widgets::card(ui, |ui| {
+        widgets::card_fill(ui, |ui| {
             ui.horizontal(|ui| {
                 for level in [EventLevel::Info, EventLevel::Warning, EventLevel::Error] {
                     let label = match level {
@@ -99,34 +100,47 @@ impl EventsView {
                 );
                 return;
             }
-            egui::ScrollArea::vertical()
-                .auto_shrink(false)
-                .show(ui, |ui| {
-                    egui::Grid::new("events")
-                        .num_columns(4)
-                        .striped(true)
-                        .spacing([16.0, 8.0])
-                        .min_col_width(60.0)
-                        .show(ui, |ui| {
-                            for header in ["Time", "Level", "Source", "Message"] {
-                                ui.label(RichText::new(header).small().strong().color(p.text_weak));
-                            }
-                            ui.end_row();
-                            for event in events {
-                                ui.label(
-                                    RichText::new(format_relative(event.at)).color(p.text_weak),
-                                )
-                                .on_hover_text(format_time(event.at));
-                                widgets::pill(
-                                    ui,
-                                    level_label(event.level),
-                                    level_color(event.level, &p),
-                                );
-                                ui.label(event.app_name.as_deref().unwrap_or("Gravekeeper"));
-                                ui.label(&event.message);
-                                ui.end_row();
-                            }
+            // A real table: rows span the full width (the message column takes the rest) and
+            // only visible rows are laid out.
+            let row_height = ui.spacing().interact_size.y + 4.0;
+            TableBuilder::new(ui)
+                .striped(true)
+                .resizable(false)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .column(Column::exact(90.0))
+                .column(Column::exact(80.0))
+                .column(Column::initial(150.0).at_least(80.0).clip(true))
+                .column(Column::remainder().clip(true))
+                .min_scrolled_height(0.0)
+                .header(24.0, |mut header| {
+                    for title in ["Time", "Level", "Source", "Message"] {
+                        header.col(|ui| {
+                            ui.label(RichText::new(title).small().strong().color(p.text_weak));
                         });
+                    }
+                })
+                .body(|body| {
+                    body.rows(row_height, events.len(), |mut row| {
+                        let event = events[row.index()];
+                        row.col(|ui| {
+                            ui.label(RichText::new(format_relative(event.at)).color(p.text_weak))
+                                .on_hover_text(format_time(event.at));
+                        });
+                        row.col(|ui| {
+                            widgets::pill(
+                                ui,
+                                level_label(event.level),
+                                level_color(event.level, &p),
+                            );
+                        });
+                        row.col(|ui| {
+                            ui.label(event.app_name.as_deref().unwrap_or("Gravekeeper"));
+                        });
+                        row.col(|ui| {
+                            ui.add(egui::Label::new(&event.message).truncate())
+                                .on_hover_text(&event.message);
+                        });
+                    });
                 });
         });
     }

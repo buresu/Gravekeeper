@@ -104,10 +104,12 @@ pub fn show(ui: &mut egui::Ui, snapshot: &Snapshot) -> Option<AppId> {
                 ui.add_space(12.0);
             }
 
-            ui.columns(2, |cols| {
-                widgets::card(&mut cols[0], |ui| resources(ui, snapshot));
-                widgets::card(&mut cols[1], |ui| upcoming(ui, snapshot));
-            });
+            widgets::card_row(
+                ui,
+                &mut [&mut |ui| resources(ui, snapshot), &mut |ui| {
+                    upcoming(ui, snapshot)
+                }],
+            );
             ui.add_space(12.0);
 
             widgets::card(ui, |ui| {
