@@ -1710,7 +1710,7 @@ dependencies = [
 
 [[package]]
 name = "gravekeeper"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eframe",
  "egui_extras",
@@ -1736,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "gravekeeper-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "jiff",
  "libc",
