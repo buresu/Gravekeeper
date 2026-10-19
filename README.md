@@ -46,8 +46,8 @@ Screenshots follow your light or dark preference; the app has both themes.
 
 ## Installing
 
-Download a package from the releases (`.deb`, `.AppImage`, Windows `-setup.exe`, macOS `.dmg`),
-or build one yourself — see [docs/distribution.md](docs/distribution.md). On Linux without a
+Download a package from the releases (Linux `.deb` and `.AppImage` for x64 and arm64,
+Windows `-setup.exe`, macOS `.dmg` for Apple silicon), or build one yourself — see [docs/distribution.md](docs/distribution.md). On Linux without a
 package, `packaging/linux/install.sh` installs a release build into `~/.local`.
 
 ## Usage

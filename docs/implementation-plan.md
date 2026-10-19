@@ -103,6 +103,7 @@ See [phase0-report.md](phase0-report.md) for details.
 - [x] **Installers** with cargo-packager: `.deb` and AppImage (built and run on Linux), NSIS and dmg (CI); user-local `install.sh`; release workflow with checksums and draft releases
 - [x] **Update and code signing design** ([distribution.md](distribution.md))
 - [x] AppImage mounts and other read-only file systems are no longer monitored (they caused false disk alerts)
+- [x] Linux arm64 (aarch64) `.deb` and AppImage, built and tested on GitHub's arm64 runners
 - [ ] Windows service (session 0, service control handler) — with the separate supervisor process
 - [ ] Graceful stop and exit detection on Windows (from Phase 1)
 - [ ] macOS: stopping children when Gravekeeper is killed; adopting orphans after a restart

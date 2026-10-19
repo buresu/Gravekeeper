@@ -19,7 +19,7 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 | Headless mode (`--headless`, signals) | ✅ | ✅ | 🧪 Ctrl-C only | 🧪 |
 | User service (`service install`) | ✅ systemd user (unit verified, not installed) | ✅ same | ⏳ | 🧪 LaunchAgent |
 | Children stopped if Gravekeeper is killed | ✅ PDEATHSIG | ✅ | 🧪 Job Object | ⏳ |
-| Installer | ✅ .deb / AppImage built and run | ✅ same | 🧪 NSIS (CI) | 🧪 dmg (CI) |
+| Installer | ✅ .deb / AppImage built and run (x64); 🧪 arm64 (CI) | ✅ same | 🧪 NSIS (CI) | 🧪 dmg (CI) |
 | Schedules (incl. DST, missed runs) | ✅ | ✅ | 🧪 | 🧪 |
 | Webhooks | ✅ | ✅ | 🧪 | 🧪 |
 | CPU / memory / disk monitoring | ✅ | ✅ | 🧪 | 🧪 |

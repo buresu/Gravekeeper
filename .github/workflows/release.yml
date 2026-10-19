@@ -39,8 +39,12 @@ jobs:
       matrix:
         include:
           # The oldest supported Ubuntu keeps the glibc requirement low for .deb and AppImage.
-          - name: linux
+          # Each architecture is built natively (linuxdeploy cannot cross-package AppImages).
+          - name: linux-x64
             os: ubuntu-22.04
+            formats: deb,appimage
+          - name: linux-arm64
+            os: ubuntu-22.04-arm
             formats: deb,appimage
           - name: windows
             os: windows-latest

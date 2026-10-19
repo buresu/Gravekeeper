@@ -8,8 +8,8 @@ Installers are built with [cargo-packager](https://github.com/crabnebula-dev/car
 
 | OS | Format | Installs to | Notes |
 |---|---|---|---|
-| Linux | `.deb` | `/usr/bin/gravekeeper`, menu entry, icons | Debian, Ubuntu and derivatives |
-| Linux | `.AppImage` | runs from the file | Any distribution; no menu entry unless integrated by the user's AppImage tool |
+| Linux | `.deb` | `/usr/bin/gravekeeper`, menu entry, icons | Debian, Ubuntu and derivatives; amd64 and arm64 |
+| Linux | `.AppImage` | runs from the file | Any distribution, x86_64 and aarch64; no menu entry unless integrated by the user's AppImage tool |
 | Linux | `packaging/linux/install.sh` | `~/.local/bin`, `~/.local/share` | No package manager needed; `--uninstall` removes it |
 | Windows | NSIS `…-setup.exe` | per user (no administrator rights) | Start menu entry, uninstaller |
 | macOS | `.dmg` with `Gravekeeper.app` | `/Applications` (drag and drop) | Native architecture of the build machine |
@@ -23,7 +23,7 @@ cargo packager -p gravekeeper --release --formats nsis           # Windows
 cargo packager -p gravekeeper --release --formats dmg            # macOS
 ```
 
-`.github/workflows/release.yml` builds all of them on GitHub Actions. Pushing a tag `vX.Y.Z` creates a **draft** release with the packages and a `SHA256SUMS` file; it is published by hand after a check.
+`.github/workflows/release.yml` builds all of them on GitHub Actions; the Linux packages are built twice, on x64 and on arm64 runners (`ubuntu-22.04-arm`), because AppImages cannot be cross-packaged. Pushing a tag `vX.Y.Z` creates a **draft** release with the packages and a `SHA256SUMS` file; it is published by hand after a check.
 
 On Windows the C runtime is linked statically (`.cargo/config.toml`), so the executable runs without the Visual C++ Redistributable. macOS builds target macOS 11 (`MACOSX_DEPLOYMENT_TARGET` in the workflow, `minimum-system-version` in `Cargo.toml`).
 

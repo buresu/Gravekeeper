@@ -36,13 +36,13 @@ cargo run -p gravekeeper --no-default-features --features wgpu
 The Windows and macOS code paths can be type-checked without those machines. Two dependencies compile C code for the target: the bundled SQLite (point `libsqlite3-sys` at a non-existent system library instead; nothing is linked by `check`/`clippy`) and TLS for webhooks (turn off the `http` feature):
 
 ```sh
-rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin
+rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin aarch64-unknown-linux-gnu
 LIBSQLITE3_SYS_USE_PKG_CONFIG=1 SQLITE3_LIB_DIR=/nonexistent \
   cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc \
   --no-default-features --features gravekeeper/glow -- -D warnings
 ```
 
-(Same for `aarch64-apple-darwin`.)
+(Same for `aarch64-apple-darwin` and `aarch64-unknown-linux-gnu`.)
 
 ### Runtime environment variables
 
@@ -72,6 +72,15 @@ GUI pages and forms are tested headlessly with egui_kittest (no window or GPU ne
 GRAVEKEEPER_SCREENSHOTS=target/screens cargo test -p gravekeeper screenshots -- --ignored
 ```
 
+The README images in `docs/images/` are a selection of these, compressed:
+
+```sh
+for f in dashboard applications schedule-editor events; do for t in dark light; do
+  pngquant --quality 85-100 --strip --force --output docs/images/$f-$t.png target/screens/$f-$t.png
+done; done
+oxipng -o 4 --strip safe docs/images/*.png
+```
+
 Window and tray behavior (closing to the tray, reopening) was checked with D-Bus and KWin scripts (see [phase0-report.md](phase0-report.md)). Native file dialogs open the real portal dialog and are checked by hand.
 
 To try the GUI without touching your real configuration:
@@ -84,6 +93,6 @@ GRAVEKEEPER_HOME=/tmp/gk-test cargo run -p gravekeeper
 
 `.github/workflows/ci.yml` runs:
 
-- Ubuntu / Windows / macOS: fmt, clippy, test, and a check of the wgpu build
+- Ubuntu (x64 and arm64) / Windows / macOS: fmt, clippy, test, and a check of the wgpu build
 - A check at the MSRV (1.95)
 - cargo-deny
