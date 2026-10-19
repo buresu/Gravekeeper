@@ -23,6 +23,8 @@ const LOG_LINES: usize = 1000;
 pub(super) struct State {
     /// When each schedule last ran, as persisted in the history database.
     pub last_runs: HashMap<ScheduleId, SystemTime>,
+    /// When each schedule's timetable began (added, changed or enabled), also persisted.
+    pub plans: HashMap<ScheduleId, SystemTime>,
     runtimes: HashMap<ScheduleId, Runtime>,
 }
 
@@ -68,13 +70,21 @@ impl Engine {
 
         let now = SystemTime::now();
         for spec in specs {
-            if self
-                .schedules
-                .runtimes
-                .get(&spec.id)
-                .is_some_and(|rt| rt.spec == spec)
-            {
-                continue;
+            let began = match self.schedules.runtimes.get(&spec.id) {
+                Some(rt) if rt.spec == spec => continue,
+                Some(rt) => !schedule::same_timetable(&rt.spec, &spec),
+                // Added while running, or seen for the first time at startup.
+                None => {
+                    !catch_up
+                        || !(self.schedules.plans.contains_key(&spec.id)
+                            || self.schedules.last_runs.contains_key(&spec.id))
+                }
+            };
+            if began {
+                self.schedules.plans.insert(spec.id.clone(), now);
+                if let Some(store) = &self.store {
+                    store.record_schedule_planned(spec.id.clone(), now);
+                }
             }
             if !self.schedules.runtimes.contains_key(&spec.id) {
                 let log = Arc::new(self.new_log(LOG_LINES, || format!("schedule-{}.log", spec.id)));
@@ -102,6 +112,7 @@ impl Engine {
 
     fn plan_one(&mut self, spec: &ScheduleSpec, now: SystemTime, catch_up: bool) {
         let last_run = self.schedules.last_runs.get(&spec.id).copied();
+        let since = self.schedules.plans.get(&spec.id).copied();
         let boot = self.boot_time.and_then(to_ts);
         let (plan, problem) = match (spec.time_zone(), to_ts(now)) {
             (Ok(tz), Some(now_ts)) => (
@@ -109,6 +120,7 @@ impl Engine {
                     spec,
                     &tz,
                     last_run.and_then(to_ts),
+                    since.and_then(to_ts),
                     now_ts,
                     boot,
                     catch_up,

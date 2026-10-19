@@ -127,7 +127,7 @@ Applications with `autostart = true` start in the order they are listed. Each on
 
 **Time zones and DST.** Times are wall-clock times in `time_zone` (the system zone if absent). A time skipped by a DST change runs at the next valid instant; a time that occurs twice runs once, at the first occurrence.
 
-**Missed runs.** A run counts as missed when it is more than 2 minutes late — because Gravekeeper was not running or the computer was asleep. With `missed = "skip"` it is recorded (a `schedule_missed` event) and the next regular run is awaited; with `missed = "run-once"` it runs once as soon as possible, however many runs were missed. The time of the last run is kept in the history database, so this also works across restarts. A `run` action that is still running when the next run is due is not started twice; that run is skipped and recorded.
+**Missed runs.** A run counts as missed when it is more than 2 minutes late — because Gravekeeper was not running or the computer was asleep. With `missed = "skip"` it is recorded (a `schedule_missed` event) and the next regular run is awaited; with `missed = "run-once"` it runs once as soon as possible, however many runs were missed. The time of the last run, and when the schedule was added or its timing (`when`, `time_zone`, `enabled`) last changed, are kept in the history database, so this also works across restarts — including a first run that was due before the schedule ever ran (e.g. a `once` schedule whose time passed while the computer was off). Runs due before the schedule was added or changed are never owed. A `run` action that is still running when the next run is due is not started twice; that run is skipped and recorded.
 
 ## Webhooks
 

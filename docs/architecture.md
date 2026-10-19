@@ -18,7 +18,7 @@ gravekeeper-core (lib: no GUI dependency)
     ├─ webhook        Webhook types, payloads, HTTP delivery with retries
     ├─ api            Command / Snapshot / AppStatus / Event (serde-enabled; the future IPC protocol)
     ├─ config         TOML schema, validation, atomic save, migrations, Secret
-    ├─ store          SQLite event history and schedule run times on a writer thread
+    ├─ store          SQLite event history and schedule run/plan times on a writer thread
     ├─ logfile        Rotating files, log writer thread, config backups
     ├─ process        Spawn, stop, process-tree termination, stdout/stderr capture (LogBuffer)
     └─ paths          Per-user locations ($GRAVEKEEPER_HOME override)
@@ -64,7 +64,7 @@ Both running modes take the same lock, so only one supervises. Logging goes to s
 3. The history database is opened; failure is recorded as a `HistoryUnavailable` event and events are then kept in memory only.
 4. The configuration is loaded. If it is invalid, the engine starts with no applications, sets `Snapshot::config_error`, and refuses to save until the file is fixed and reloaded — it never overwrites a file it could not read.
 5. Applications with `autostart` enter `Waiting` until `max(start_delay, boot_delay − uptime)`. Only the first waiting application in list order is eligible, so automatic starts happen top to bottom.
-6. Schedules are planned with catch-up: a run missed since the last recorded run is reported and, with `run-once`, made due immediately (see [configuration.md](configuration.md#schedules)).
+6. Schedules are planned with catch-up: a run missed since the last recorded run (or, if later, since the schedule was added or its timing changed) is reported and, with `run-once`, made due immediately (see [configuration.md](configuration.md#schedules)).
 7. Monitoring starts; webhooks start delivering once the runtime runs (events from startup are queued).
 
 ## Supervised application lifecycle
@@ -124,7 +124,7 @@ With `app_log_files`, each application's and schedule's `LogBuffer` also hands l
 
 ## Event history
 
-Events (`Event { at, level, kind, app, message }`) are kept in the snapshot (latest 500) and written to `<data>/history.sqlite3` in WAL mode, together with each schedule's last run time. The schema is versioned with `PRAGMA user_version` (migration 1: events, 2: schedule runs); the oldest events beyond 100,000 are deleted at startup.
+Events (`Event { at, level, kind, app, message }`) are kept in the snapshot (latest 500) and written to `<data>/history.sqlite3` in WAL mode, together with each schedule's last run time and when its timetable began. The schema is versioned with `PRAGMA user_version` (migration 1: events, 2: schedule runs, 3: schedule plans); the oldest events beyond 100,000 are deleted at startup.
 
 ## Window and tray lifecycle
 

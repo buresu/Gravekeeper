@@ -213,11 +213,11 @@ fn runs_missed_while_stopped_are_caught_up() {
     core.shutdown();
     drop(core);
 
-    // Pretend the last run was three days ago.
+    // Pretend the last run (and setting the schedule up before it) was three days ago.
     let db = rusqlite::Connection::open(dir.path().join("history.sqlite3")).unwrap();
-    db.execute(
-        "UPDATE schedule_runs SET last_run_ms = last_run_ms - 3 * 86400000",
-        [],
+    db.execute_batch(
+        "UPDATE schedule_runs SET last_run_ms = last_run_ms - 3 * 86400000;
+         UPDATE schedule_plans SET since_ms = since_ms - 3 * 86400000;",
     )
     .unwrap();
     drop(db);
@@ -240,6 +240,40 @@ fn runs_missed_while_stopped_are_caught_up() {
         missed.message.contains("running it now"),
         "{}",
         missed.message
+    );
+}
+
+#[test]
+fn a_first_run_missed_while_stopped_is_caught_up() {
+    let mut schedule = run_schedule("nightly", &["exit", "0"], Duration::from_secs(30));
+    schedule.missed = MissedRun::RunOnce;
+    let (dir, core) = start_with(quiet(Config {
+        schedules: vec![schedule],
+        ..Config::default()
+    }));
+    core.shutdown();
+    drop(core);
+
+    // Pretend the schedule was set up three days ago and has never run since.
+    let db = rusqlite::Connection::open(dir.path().join("history.sqlite3")).unwrap();
+    let changed = db
+        .execute(
+            "UPDATE schedule_plans SET since_ms = since_ms - 3 * 86400000",
+            [],
+        )
+        .unwrap();
+    assert_eq!(changed, 1, "the schedule's start was recorded");
+    drop(db);
+
+    let core = start(&dir);
+    let snapshot = wait_for(&core, "catch-up run", |s| {
+        has(s, EventKind::ScheduleMissed) && has(s, EventKind::ScheduleSucceeded)
+    });
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .any(|e| e.kind == EventKind::ScheduleMissed && e.message.contains("running it now"))
     );
 }
 

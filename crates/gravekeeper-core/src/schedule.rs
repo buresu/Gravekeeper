@@ -221,16 +221,25 @@ pub struct Plan {
     pub missed: Option<Timestamp>,
 }
 
+/// Whether two versions of a schedule fire at the same times. When they do not, runs due
+/// under the old version are no longer owed.
+pub fn same_timetable(a: &ScheduleSpec, b: &ScheduleSpec) -> bool {
+    a.enabled == b.enabled && a.when == b.when && a.time_zone == b.time_zone
+}
+
 /// Plans a schedule from its last run.
 ///
-/// With `catch_up` (at startup), a run that should have happened since `last_run` is
-/// reported as missed and, with [`MissedRun::RunOnce`], made due immediately. Without it
+/// `since` is when the schedule's timetable began (it was added, changed or enabled). With
+/// `catch_up` (at startup), a run that should have happened since the later of `last_run`
+/// and `since` is reported as missed and, with [`MissedRun::RunOnce`], made due
+/// immediately; this includes the first run of a schedule that has never run. Without it
 /// (after an edit), only future runs are considered. `AfterBoot` schedules run once per
 /// boot however late Gravekeeper starts, and are never "missed".
 pub fn plan(
     spec: &ScheduleSpec,
     tz: &TimeZone,
     last_run: Option<Timestamp>,
+    since: Option<Timestamp>,
     now: Timestamp,
     boot: Option<Timestamp>,
     catch_up: bool,
@@ -265,10 +274,11 @@ pub fn plan(
             missed: None,
         };
     }
-    let Some(due) = next_after(&spec.when, tz, last_run.unwrap_or(now), boot) else {
+    let from = last_run.max(since);
+    let Some(due) = next_after(&spec.when, tz, from.unwrap_or(now), boot) else {
         return none;
     };
-    if last_run.is_some()
+    if from.is_some()
         && now.duration_since(due) > jiff::SignedDuration::try_from(LATE).unwrap_or_default()
     {
         let next = match spec.missed {
@@ -443,6 +453,7 @@ mod tests {
             &daily(MissedRun::RunOnce),
             &tz,
             None,
+            None,
             at("2026-10-19T12:00", &tz),
             None,
             true,
@@ -457,15 +468,23 @@ mod tests {
         let last = Some(at("2026-10-17T09:00", &tz));
         let now = at("2026-10-19T12:00", &tz);
 
-        let skip = plan(&daily(MissedRun::Skip), &tz, last, now, None, true);
+        let skip = plan(&daily(MissedRun::Skip), &tz, last, None, now, None, true);
         assert_eq!(local(skip.missed.unwrap(), &tz), "2026-10-18 09:00 Sun");
         assert_eq!(local(skip.next.unwrap(), &tz), "2026-10-20 09:00 Tue");
 
-        let once = plan(&daily(MissedRun::RunOnce), &tz, last, now, None, true);
+        let once = plan(&daily(MissedRun::RunOnce), &tz, last, None, now, None, true);
         assert_eq!(once.next, Some(now));
 
         // Edits do not catch up.
-        let edit = plan(&daily(MissedRun::RunOnce), &tz, last, now, None, false);
+        let edit = plan(
+            &daily(MissedRun::RunOnce),
+            &tz,
+            last,
+            None,
+            now,
+            None,
+            false,
+        );
         assert_eq!(
             edit,
             Plan {
@@ -480,9 +499,79 @@ mod tests {
         let tz = tz("UTC");
         let last = Some(at("2026-10-18T09:00", &tz));
         let now = at("2026-10-19T09:01", &tz);
-        let p = plan(&daily(MissedRun::Skip), &tz, last, now, None, true);
+        let p = plan(&daily(MissedRun::Skip), &tz, last, None, now, None, true);
         assert_eq!(p.missed, None);
         assert_eq!(p.next, Some(at("2026-10-19T09:00", &tz)));
+    }
+
+    #[test]
+    fn first_run_is_caught_up_from_when_the_schedule_began() {
+        let tz = tz("UTC");
+        let since = Some(at("2026-10-18T10:00", &tz));
+        let now = at("2026-10-19T09:30", &tz);
+
+        let once = plan(
+            &daily(MissedRun::RunOnce),
+            &tz,
+            None,
+            since,
+            now,
+            None,
+            true,
+        );
+        assert_eq!(once.next, Some(now));
+        assert_eq!(local(once.missed.unwrap(), &tz), "2026-10-19 09:00 Mon");
+
+        let skip = plan(&daily(MissedRun::Skip), &tz, None, since, now, None, true);
+        assert_eq!(local(skip.next.unwrap(), &tz), "2026-10-20 09:00 Tue");
+        assert!(skip.missed.is_some());
+
+        // Runs due before the schedule began (or was last changed) are not owed.
+        let changed = Some(at("2026-10-19T09:20", &tz));
+        let p = plan(
+            &daily(MissedRun::RunOnce),
+            &tz,
+            since,
+            changed,
+            now,
+            None,
+            true,
+        );
+        assert_eq!(p.missed, None);
+        assert_eq!(local(p.next.unwrap(), &tz), "2026-10-20 09:00 Tue");
+    }
+
+    #[test]
+    fn a_one_off_run_missed_while_off_still_happens() {
+        let tz = tz("UTC");
+        let mut spec = daily(MissedRun::RunOnce);
+        spec.when = When::Once {
+            at: "2026-10-19T09:00".parse().unwrap(),
+        };
+        let since = Some(at("2026-10-18T10:00", &tz));
+        let now = at("2026-10-19T12:00", &tz);
+        assert_eq!(
+            plan(&spec, &tz, None, since, now, None, true).next,
+            Some(now)
+        );
+        // Once it has run, it is done.
+        let ran = Some(now);
+        let later = at("2026-10-20T12:00", &tz);
+        assert_eq!(plan(&spec, &tz, ran, since, later, None, true).next, None);
+    }
+
+    #[test]
+    fn timetable_changes() {
+        let a = daily(MissedRun::Skip);
+        let mut b = a.clone();
+        b.name = "renamed".into();
+        b.missed = MissedRun::RunOnce;
+        assert!(same_timetable(&a, &b));
+        b.enabled = false;
+        assert!(!same_timetable(&a, &b));
+        let mut c = a.clone();
+        c.time_zone = Some("Asia/Tokyo".into());
+        assert!(!same_timetable(&a, &c));
     }
 
     #[test]
@@ -495,14 +584,17 @@ mod tests {
         let boot = at("2026-10-19T08:00", &tz);
         let now = at("2026-10-19T10:00", &tz);
         assert_eq!(
-            plan(&spec, &tz, None, now, Some(boot), true).next,
+            plan(&spec, &tz, None, None, now, Some(boot), true).next,
             Some(now)
         );
         let ran = Some(at("2026-10-19T08:01", &tz));
-        assert_eq!(plan(&spec, &tz, ran, now, Some(boot), true).next, None);
+        assert_eq!(
+            plan(&spec, &tz, ran, None, now, Some(boot), true).next,
+            None
+        );
         let previous_boot = Some(at("2026-10-18T08:01", &tz));
         assert_eq!(
-            plan(&spec, &tz, previous_boot, now, Some(boot), true).next,
+            plan(&spec, &tz, previous_boot, None, now, Some(boot), true).next,
             Some(now)
         );
     }
@@ -513,7 +605,7 @@ mod tests {
         let mut spec = daily(MissedRun::RunOnce);
         spec.enabled = false;
         assert_eq!(
-            plan(&spec, &tz, None, Timestamp::now(), None, true).next,
+            plan(&spec, &tz, None, None, Timestamp::now(), None, true).next,
             None
         );
     }

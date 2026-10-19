@@ -32,11 +32,18 @@ const MIGRATIONS: &[&str] = &[
         schedule_id TEXT PRIMARY KEY,
         last_run_ms INTEGER NOT NULL
     );",
+    // When each schedule's timetable began (it was added, changed or enabled), so runs due
+    // before its first run can be detected as missed too.
+    "CREATE TABLE schedule_plans (
+        schedule_id TEXT PRIMARY KEY,
+        since_ms    INTEGER NOT NULL
+    );",
 ];
 
 enum Write {
     Event(Event),
     ScheduleRun(ScheduleId, SystemTime),
+    SchedulePlanned(ScheduleId, SystemTime),
 }
 
 /// What the store remembers from previous runs of Gravekeeper.
@@ -44,6 +51,7 @@ pub struct Recalled {
     /// Up to the requested number of latest events, oldest first.
     pub events: Vec<Event>,
     pub schedule_runs: HashMap<ScheduleId, SystemTime>,
+    pub schedule_plans: HashMap<ScheduleId, SystemTime>,
 }
 
 pub struct Store {
@@ -63,7 +71,14 @@ impl Store {
         )?;
         let recalled = Recalled {
             events: latest(&conn, recent)?,
-            schedule_runs: schedule_runs(&conn)?,
+            schedule_runs: schedule_times(
+                &conn,
+                "SELECT schedule_id, last_run_ms FROM schedule_runs",
+            )?,
+            schedule_plans: schedule_times(
+                &conn,
+                "SELECT schedule_id, since_ms FROM schedule_plans",
+            )?,
         };
 
         let (tx, rx) = mpsc::channel();
@@ -86,6 +101,10 @@ impl Store {
 
     pub fn record_schedule_run(&self, id: ScheduleId, at: SystemTime) {
         self.send(Write::ScheduleRun(id, at));
+    }
+
+    pub fn record_schedule_planned(&self, id: ScheduleId, since: SystemTime) {
+        self.send(Write::SchedulePlanned(id, since));
     }
 
     fn send(&self, write: Write) {
@@ -145,6 +164,10 @@ fn insert(conn: &mut Connection, writes: &[Write]) -> rusqlite::Result<()> {
             "INSERT INTO schedule_runs (schedule_id, last_run_ms) VALUES (?1, ?2)
              ON CONFLICT (schedule_id) DO UPDATE SET last_run_ms = excluded.last_run_ms",
         )?;
+        let mut plan = tx.prepare_cached(
+            "INSERT INTO schedule_plans (schedule_id, since_ms) VALUES (?1, ?2)
+             ON CONFLICT (schedule_id) DO UPDATE SET since_ms = excluded.since_ms",
+        )?;
         for write in writes {
             match write {
                 Write::Event(e) => event.execute(params![
@@ -156,14 +179,21 @@ fn insert(conn: &mut Connection, writes: &[Write]) -> rusqlite::Result<()> {
                     e.message,
                 ])?,
                 Write::ScheduleRun(id, at) => run.execute(params![id.0, to_millis(*at)])?,
+                Write::SchedulePlanned(id, since) => {
+                    plan.execute(params![id.0, to_millis(*since)])?
+                }
             };
         }
     }
     tx.commit()
 }
 
-fn schedule_runs(conn: &Connection) -> rusqlite::Result<HashMap<ScheduleId, SystemTime>> {
-    let mut stmt = conn.prepare("SELECT schedule_id, last_run_ms FROM schedule_runs")?;
+/// Reads a `(schedule_id, milliseconds)` query into a map.
+fn schedule_times(
+    conn: &Connection,
+    sql: &str,
+) -> rusqlite::Result<HashMap<ScheduleId, SystemTime>> {
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((ScheduleId(row.get(0)?), from_millis(row.get(1)?)))
     })?;
@@ -230,6 +260,8 @@ mod tests {
         let run = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         store.record_schedule_run(ScheduleId("s".into()), UNIX_EPOCH);
         store.record_schedule_run(ScheduleId("s".into()), run);
+        store.record_schedule_planned(ScheduleId("s".into()), UNIX_EPOCH);
+        store.record_schedule_planned(ScheduleId("s".into()), run);
         drop(store);
 
         let (_store, recalled) = Store::open(&path, 3).unwrap();
@@ -237,6 +269,7 @@ mod tests {
         assert_eq!(messages, ["event 2", "event 3", "event 4"]);
         assert_eq!(recalled.events[2], event(4));
         assert_eq!(recalled.schedule_runs[&ScheduleId("s".into())], run);
+        assert_eq!(recalled.schedule_plans[&ScheduleId("s".into())], run);
     }
 
     #[test]

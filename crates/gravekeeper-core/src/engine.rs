@@ -312,6 +312,7 @@ impl Engine {
             Ok((store, recalled)) => {
                 self.events.extend(recalled.events);
                 self.schedules.last_runs = recalled.schedule_runs;
+                self.schedules.plans = recalled.schedule_plans;
                 self.store = Some(store);
             }
             Err(err) => self.emit(
