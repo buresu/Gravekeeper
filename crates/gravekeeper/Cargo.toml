@@ -9,7 +9,7 @@ publish.workspace = true
 
 [dependencies]
 gravekeeper-core.workspace = true
-eframe = { workspace = true, features = ["default_fonts", "system_fonts", "wayland", "x11", "persistence"] }
+eframe = { workspace = true, features = ["clipboard", "default_fonts", "system_fonts", "wayland", "x11", "persistence"] }
 egui_extras.workspace = true
 jiff.workspace = true
 rfd.workspace = true
