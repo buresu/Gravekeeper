@@ -18,7 +18,8 @@ pub enum CloseBehavior {
     /// hiding windows; Wayland does not.
     Hide,
     /// Destroy the window and leave the event loop; a new window is created on demand. Needs
-    /// a tray that runs independently of the event loop (ksni on Linux).
+    /// a tray that works without the event loop: ksni on Linux, and on Windows a message loop
+    /// that `gui.rs` runs while there is no window.
     Destroy,
     /// No tray is available, so closing the window exits the application.
     Quit,
@@ -26,7 +27,7 @@ pub enum CloseBehavior {
 
 impl CloseBehavior {
     pub fn platform_default() -> Self {
-        if cfg!(target_os = "linux") {
+        if cfg!(any(target_os = "linux", windows)) {
             Self::Destroy
         } else {
             Self::Hide

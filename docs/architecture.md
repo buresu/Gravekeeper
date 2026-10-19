@@ -132,13 +132,14 @@ What closing the main window does (`CloseBehavior`) has a per-OS default.
 
 | Value | Behavior | Default on | Why |
 |---|---|---|---|
-| `Hide` | `CancelClose` + `Visible(false)`; the event loop keeps running | Windows / macOS | The tray depends on the main-thread event loop, so the loop cannot stop |
-| `Destroy` | Destroy the window and return from `run_native_ext`; a new window is created when the tray asks for one | Linux | winit cannot hide windows on Wayland. ksni runs on its own thread, so the tray keeps working without the loop |
+| `Hide` | `CancelClose` + `Visible(false)`; the event loop keeps running | macOS | The tray depends on the main-thread event loop, so the loop cannot stop |
+| `Destroy` | Destroy the window and return from `run_native_ext`; a new window is created when the tray asks for one | Linux / Windows | winit cannot hide windows on Wayland. ksni runs on its own thread; on Windows the tray only needs the main thread to process messages, which `wait_for_tray` does while there is no window |
 | `Quit` | Closing the window exits | No tray | A hidden window could never be shown again |
 
 - On Linux the tray is only created if a StatusNotifierItem host (`org.kde.StatusNotifierWatcher`) is on the session bus; otherwise `Quit` is used and the window always opens.
 - The same `egui::Context` is passed to every `run_native_ext` call, so the `Notifier` stays valid when the window is recreated. The selected tab and application are saved with eframe's persistence and restored with the window.
 - Tray callbacks may run on any thread. `Shell::handle` sends a `ViewportCommand` while a window exists, and otherwise (`Destroy` mode) sends the action to the main loop's channel.
+- A minimized start creates no window in `Destroy` mode. In `Hide` mode the window is created hidden, but eframe shows every window after its first frame, so the app sends `Visible(false)` at creation, which takes effect right after that show.
 - Quitting from the window asks for confirmation when applications are running; quitting from the tray does not.
 - `GRAVEKEEPER_CLOSE_BEHAVIOR=hide|destroy|quit` overrides the default (for testing).
 

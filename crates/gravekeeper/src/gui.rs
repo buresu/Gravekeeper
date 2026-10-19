@@ -57,10 +57,12 @@ pub fn run(paths: Paths, start_minimized: bool, process_started: Instant) -> Exi
     let (wake_tx, wake_rx) = mpsc::channel();
     let shell = Arc::new(Shell::new(ctx, wake_tx));
 
-    // The ksni tray runs on its own thread, so on Linux it can exist before (and between)
-    // windows. Elsewhere it needs the running event loop, so it is created with the window.
+    // The ksni tray runs on its own thread, and on Windows the tray only needs this thread to
+    // process messages (`wait_for_tray` does that between windows), so there it can exist
+    // before (and between) windows. On macOS it needs the running event loop, so it is created
+    // with the window.
     let mut tray: Option<TrayIcon> = None;
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", windows)) {
         tray = create_tray(&shell, &mut options);
     }
 
@@ -77,9 +79,9 @@ pub fn run(paths: Paths, start_minimized: bool, process_started: Instant) -> Exi
         if shell.quit_requested() || options.close != CloseBehavior::Destroy {
             break Ok(());
         }
-        match wake_rx.recv() {
-            Ok(TrayAction::Show) => show_window = true,
-            Ok(TrayAction::Quit) | Err(_) => break Ok(()),
+        match wait_for_tray(&wake_rx) {
+            Some(TrayAction::Show) => show_window = true,
+            Some(TrayAction::Quit) | None => break Ok(()),
         }
     };
 
@@ -105,6 +107,40 @@ fn create_tray(shell: &Arc<Shell>, options: &mut Options) -> Option<TrayIcon> {
     }
 }
 
+/// Waits for a tray action while there is no window.
+#[cfg(not(windows))]
+fn wait_for_tray(wake_rx: &mpsc::Receiver<TrayAction>) -> Option<TrayAction> {
+    wake_rx.recv().ok()
+}
+
+/// Waits for a tray action while there is no window, processing this thread's messages: the
+/// tray's callbacks run while its messages are dispatched, and the event loop's hidden windows
+/// must keep answering (a thread that stops processing them can hold up logging off).
+#[cfg(windows)]
+fn wait_for_tray(wake_rx: &mpsc::Receiver<TrayAction>) -> Option<TrayAction> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, MSG, TranslateMessage,
+    };
+
+    loop {
+        match wake_rx.try_recv() {
+            Ok(action) => return Some(action),
+            Err(mpsc::TryRecvError::Disconnected) => return None,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let mut msg = MSG::default();
+        // SAFETY: `msg` is a valid MSG for the duration of each call. GetMessageW returns 0 for
+        // WM_QUIT and -1 on failure.
+        unsafe {
+            if GetMessageW(&mut msg, None, 0, 0).0 <= 0 {
+                return None;
+            }
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
 fn run_window(
     options: &Options,
     shell: &Arc<Shell>,
@@ -112,8 +148,6 @@ fn run_window(
     tray: &mut Option<TrayIcon>,
     process_started: Instant,
 ) -> eframe::Result {
-    // In Destroy mode a minimized start simply has no window yet, so only Hide starts hidden.
-    let visible = !(options.start_minimized && options.close == CloseBehavior::Hide);
     let icon = egui::IconData {
         rgba: crate::icon::rgba(128),
         width: 128,
@@ -125,8 +159,7 @@ fn run_window(
             .with_app_id(APP_ID)
             .with_inner_size([960.0, 640.0])
             .with_min_inner_size([640.0, 400.0])
-            .with_icon(icon)
-            .with_visible(visible),
+            .with_icon(icon),
         renderer: renderer(),
         ..Default::default()
     };
@@ -144,17 +177,18 @@ fn run_window(
                     Err(err) => {
                         tracing::warn!(%err, "system tray unavailable; closing the window will quit");
                         close = CloseBehavior::Quit;
-                        // Without a tray a hidden window could never be shown again.
-                        cc.egui_ctx
-                            .send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     }
                 }
             }
+            // In Destroy mode a minimized start simply has no window yet, so only Hide starts
+            // hidden; without a tray a hidden window could never be shown again.
+            let start_hidden = options.start_minimized && close == CloseBehavior::Hide;
             Ok(Box::new(ui::GravekeeperApp::new(
                 cc,
                 Arc::clone(shell),
                 core,
                 close,
+                start_hidden,
                 process_started,
             )))
         }),

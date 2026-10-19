@@ -74,6 +74,7 @@ impl<'a> GravekeeperApp<'a> {
         shell: Arc<Shell>,
         core: &'a CoreHandle,
         close: CloseBehavior,
+        start_hidden: bool,
         process_started: Instant,
     ) -> Self {
         theme::install(&cc.egui_ctx);
@@ -84,6 +85,13 @@ impl<'a> GravekeeperApp<'a> {
         let mut app = Self::detached(core, close, process_started);
         app.shell = Some(shell);
         app.restore(persisted);
+        if start_hidden {
+            // eframe shows the window once its first frame is painted, whatever the viewport
+            // builder says, so hide it again right after. This command is processed after
+            // that show.
+            cc.egui_ctx
+                .send_viewport_cmd(ViewportCommand::Visible(false));
+        }
         app
     }
 

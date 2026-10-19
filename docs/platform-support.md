@@ -7,7 +7,7 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 | Window | ✅ KDE Plasma | ✅ via XWayland | 🧪 | 🧪 |
 | CJK font fallback | ✅ Noto Sans CJK | ✅ | 🧪 | 🧪 |
 | Tray icon and menu | ✅ KDE | ✅ KDE | 🧪 | 🧪 |
-| Close to tray | ✅ Destroy | ✅ Destroy / Hide | 🧪 Hide | 🧪 Hide |
+| Close to tray | ✅ Destroy | ✅ Destroy / Hide | 🧪 Destroy | 🧪 Hide |
 | Start with `--minimized` | ✅ | ✅ | 🧪 | 🧪 |
 | Stop process with descendants | ✅ process group | ✅ | 🧪 Job Object | 🧪 process group |
 | Graceful stop request | ✅ SIGTERM | ✅ | ⏳ killed immediately | 🧪 SIGTERM |
@@ -48,7 +48,7 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 
 ### Windows
 
-- **Tray**: needs a message loop on the main thread, so the window is hidden while the event loop keeps running (`Hide`).
+- **Tray**: needs a message loop on the thread that created it (the main thread). While there is no window, Gravekeeper runs that loop itself, so closing the window destroys it (`Destroy`) and a minimized start creates no window.
 - **Stopping processes**: the Job Object is terminated immediately; there is no graceful stop request yet.
 - **`wait()` behavior**: does not return until every process in the Job has exited. On Unix it returns as soon as the direct child exits. Until this is reconciled, an application whose main process exits while its descendants keep running is still shown as running on Windows.
 - **If Gravekeeper is killed**: the Job Objects are closed with it and the supervised processes are terminated. (On Unix they keep running.)
