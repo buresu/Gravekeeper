@@ -98,7 +98,14 @@ fn open_ui(
         .with_size(egui::vec2(1200.0, 780.0))
         .with_theme(theme)
         .with_max_steps(20)
-        .with_context_setup(theme::install);
+        .with_context_setup(|ctx| {
+            theme::install(ctx);
+            // Like eframe does at runtime, so text from the OS (e.g. a localized error
+            // message) in other scripts can be drawn.
+            ctx.add_font_provider(Arc::new(
+                egui_system_font_provider::SystemFontProvider::new(),
+            ));
+        });
     if render {
         builder = builder.wgpu();
     }

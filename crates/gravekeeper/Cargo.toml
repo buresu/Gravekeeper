@@ -32,6 +32,8 @@ windows-registry.workspace = true
 [dev-dependencies]
 # Headless rendering of the UI for interaction tests and screenshots.
 egui_kittest = { version = "0.37", features = ["eframe", "wgpu", "snapshot"] }
+# The system font fallback eframe's `system_fonts` adds at runtime, for the test harness.
+egui_system_font_provider = "0.37"
 png = "0.18"
 tempfile.workspace = true
 toml.workspace = true
