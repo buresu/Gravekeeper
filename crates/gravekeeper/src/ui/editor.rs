@@ -1,6 +1,6 @@
 //! Form for adding or editing a supervised application.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eframe::egui;
@@ -195,15 +195,21 @@ impl Editor {
                         form::row(ui, "Arguments", Some("One argument per line."), |ui| {
                             form::lines(ui, &mut self.args, "--port\n8080")
                         });
+                        // The placeholder shows what an empty field means.
+                        let default_cwd = config::program_dir(Path::new(self.program.trim()))
+                            .map_or_else(
+                                || "Gravekeeper's own".to_owned(),
+                                |dir| dir.display().to_string(),
+                            );
                         form::row(
                             ui,
                             "Working directory",
-                            Some("Optional; defaults to Gravekeeper's own."),
+                            Some("Optional; defaults to the executable's folder."),
                             |ui| {
                                 form::path(
                                     ui,
                                     &mut self.cwd,
-                                    "optional",
+                                    &default_cwd,
                                     &mut self.picker,
                                     Field::Cwd,
                                     Kind::Folder,

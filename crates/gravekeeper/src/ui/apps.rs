@@ -245,7 +245,7 @@ impl AppsView {
                     ui.add(egui::Label::new(RichText::new(&command).monospace()).truncate())
                         .on_hover_text(&command);
                     ui.end_row();
-                    if let Some(cwd) = &spec.cwd {
+                    if let Some(cwd) = spec.working_dir() {
                         widgets::property_label(ui, "Working directory");
                         ui.label(RichText::new(cwd.display().to_string()).monospace());
                         ui.end_row();

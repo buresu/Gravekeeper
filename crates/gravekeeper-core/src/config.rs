@@ -199,14 +199,30 @@ impl AppSpec {
         }
     }
 
+    /// The directory the application runs in: `cwd`, or else the folder of the program.
+    pub fn working_dir(&self) -> Option<PathBuf> {
+        self.cwd.clone().or_else(|| program_dir(&self.program))
+    }
+
     pub fn process_spec(&self) -> ProcessSpec {
         ProcessSpec {
             program: self.program.clone(),
             args: self.args.iter().map(Into::into).collect(),
-            cwd: self.cwd.clone(),
+            cwd: self.working_dir(),
             env: self.env.iter().map(|(k, v)| (k.into(), v.into())).collect(),
         }
     }
+}
+
+/// The folder of an absolute program path. A bare name (found through `PATH`) or a relative
+/// path has none: those are resolved against Gravekeeper's own working directory, so the
+/// application keeps that one.
+pub fn program_dir(program: &Path) -> Option<PathBuf> {
+    program
+        .is_absolute()
+        .then(|| program.parent())
+        .flatten()
+        .map(Path::to_path_buf)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -557,6 +573,24 @@ mod tests {
         save(&path, &sample()).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn working_dir_defaults_to_the_program_folder() {
+        let (program, folder) = if cfg!(windows) {
+            (r"C:\Tools\web\web.exe", r"C:\Tools\web")
+        } else {
+            ("/opt/web/bin/web", "/opt/web/bin")
+        };
+        let mut app = AppSpec::new("web", program);
+        assert_eq!(app.process_spec().cwd, Some(PathBuf::from(folder)));
+        app.cwd = Some("elsewhere".into());
+        assert_eq!(app.process_spec().cwd, Some(PathBuf::from("elsewhere")));
+
+        // Found through PATH, or relative to Gravekeeper's own directory: left alone.
+        for program in ["python", "bin/web"] {
+            assert_eq!(AppSpec::new("x", program).process_spec().cwd, None);
+        }
     }
 
     #[test]
