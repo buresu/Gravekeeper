@@ -99,7 +99,8 @@ impl LogView {
             .inner_margin(Margin::symmetric(10, 8))
             .show(ui, |ui| {
                 if visible.is_empty() {
-                    ui.set_min_height(120.0);
+                    // Take the space the lines will fill, so the frame does not grow later.
+                    ui.set_min_size(ui.available_size());
                     ui.label(
                         RichText::new(if self.lines.is_empty() {
                             "No output yet."

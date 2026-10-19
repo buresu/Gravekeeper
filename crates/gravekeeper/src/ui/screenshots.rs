@@ -232,6 +232,16 @@ fn screenshots() {
         let mut harness = open_ui(empty, tab, egui::Theme::Light, true);
         save(&mut harness, &out.join(format!("{name}-empty.png")));
     }
+
+    // The output keeps its size before the application has printed anything.
+    let mut harness = open_ui(core, Tab::Apps, egui::Theme::Light, true);
+    harness
+        .query_all_by_label_contains("Backup agent")
+        .next()
+        .expect("the application is listed")
+        .click();
+    harness.run_steps(2);
+    save(&mut harness, &out.join("applications-no-output.png"));
 }
 
 fn save(harness: &mut Harness<'static, GravekeeperApp<'static>>, path: &Path) {
