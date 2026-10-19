@@ -87,8 +87,9 @@ async fn stop_terminates_a_running_process() {
     let outcome = child.stop(GRACE).await.unwrap();
     assert!(started.elapsed() < Duration::from_secs(10));
     assert!(!outcome.exit.is_success());
-    // Unix: SIGTERM is honored. Windows: no graceful stop yet, so the job is killed.
-    assert_eq!(outcome.forced, cfg!(windows));
+    // Unix: SIGTERM is honored. Windows: the job is terminated right away, which is the
+    // normal stop there rather than an escalation after a timeout.
+    assert!(!outcome.forced);
 }
 
 #[tokio::test]

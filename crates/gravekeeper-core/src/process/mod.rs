@@ -102,7 +102,9 @@ impl ExitKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StopOutcome {
     pub exit: ExitKind,
-    /// The process did not exit within the grace period and was killed.
+    /// The process did not exit within the grace period and was killed. Always false on
+    /// Windows, where stopping terminates the process tree right away (there is no graceful
+    /// stop request yet).
     pub forced: bool,
 }
 
@@ -221,7 +223,9 @@ impl ManagedChild {
         self.child.start_kill()?;
         Ok(StopOutcome {
             exit: self.wait().await?,
-            forced: true,
+            // On Unix we only get here when the grace period ran out. On Windows killing is
+            // the stop itself, not an escalation, so it is not reported as forced.
+            forced: cfg!(unix),
         })
     }
 
