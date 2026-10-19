@@ -176,6 +176,9 @@ impl Editor {
                     "Program",
                     Some("Run directly, not through a shell."),
                     |ui| {
+                        form::row(ui, "Name", None, |ui| {
+                            form::text(ui, &mut self.name, "e.g. Web server")
+                        });
                         form::row(ui, "Executable", None, |ui| {
                             let picked = form::path(
                                 ui,
@@ -187,10 +190,9 @@ impl Editor {
                             );
                             if picked && self.name.trim().is_empty() {
                                 self.name = name_from_path(&self.program);
+                                // Name is drawn above, so show the new value next frame.
+                                ui.ctx().request_repaint();
                             }
-                        });
-                        form::row(ui, "Name", None, |ui| {
-                            form::text(ui, &mut self.name, "e.g. Web server")
                         });
                         form::row(ui, "Arguments", Some("One argument per line."), |ui| {
                             form::lines(ui, &mut self.args, "--port\n8080")
