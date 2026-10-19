@@ -6,9 +6,12 @@
 //! dialog is modal anyway.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 
 use eframe::egui;
+
+/// Where the last selection in this session was made, shared by all dialogs.
+static LAST_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -32,7 +35,8 @@ impl<T: Copy + PartialEq> Picker<T> {
         self.pending.is_some()
     }
 
-    /// Opens a dialog unless one is already open. `start` is shown initially if it exists.
+    /// Opens a dialog unless one is already open. It starts at `start` if that exists, else
+    /// where the last selection was made, else in the home directory.
     pub fn open(
         &mut self,
         ctx: &egui::Context,
@@ -45,7 +49,11 @@ impl<T: Copy + PartialEq> Picker<T> {
             return;
         }
         let mut dialog = rfd::FileDialog::new().set_title(title);
-        if let Some(dir) = start.and_then(existing_dir) {
+        let dir = start
+            .and_then(existing_dir)
+            .or_else(last_dir)
+            .or_else(gravekeeper_core::paths::home_dir);
+        if let Some(dir) = dir {
             dialog = dialog.set_directory(dir);
         }
         let (tx, rx) = mpsc::channel();
@@ -75,6 +83,9 @@ impl<T: Copy + PartialEq> Picker<T> {
         match rx.try_recv() {
             Ok(result) => {
                 self.pending = None;
+                if let Some(dir) = result.as_deref().and_then(existing_dir) {
+                    *LAST_DIR.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
+                }
                 result
             }
             Err(mpsc::TryRecvError::Empty) => None,
@@ -84,6 +95,15 @@ impl<T: Copy + PartialEq> Picker<T> {
             }
         }
     }
+}
+
+/// Where the last selection was made, if that folder still exists.
+fn last_dir() -> Option<PathBuf> {
+    LAST_DIR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .filter(|dir| dir.is_dir())
 }
 
 /// The directory to start a dialog in: the path itself if it is a directory, else its parent.
