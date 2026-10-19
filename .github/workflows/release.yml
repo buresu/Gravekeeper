@@ -1,7 +1,8 @@
 name: Release
 
-# Builds installers on each OS. Pushing a tag like `v0.2.0` also publishes them as a
-# GitHub release; running the workflow by hand only uploads them as build artifacts.
+# Builds installers on each OS. Pushing a tag like `v0.2.0` also publishes them as a draft
+# GitHub release (see docs/distribution.md, "Making a release"); running the workflow by
+# hand only uploads them as build artifacts.
 on:
   push:
     tags: ["v*"]
@@ -12,8 +13,27 @@ env:
   CARGO_PACKAGER_VERSION: 0.11.8
 
 jobs:
+  # A tag must name the version in Cargo.toml, so the packages and `--version` agree with it.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag against Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "gravekeeper") | .version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the version in Cargo.toml ($version)."
+            exit 1
+          fi
+
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   package:
     name: ${{ matrix.name }}
+    needs: [version, ci]
     strategy:
       fail-fast: false
       matrix:
@@ -45,6 +65,8 @@ jobs:
         env:
           # linuxdeploy (AppImage) runs without FUSE on CI.
           APPIMAGE_EXTRACT_AND_RUN: 1
+          # Matches `minimum-system-version` in crates/gravekeeper/Cargo.toml.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
           # Code signing is configured through secrets when available (docs/distribution.md):
           # Windows: certificate in the store + windows.certificate-thumbprint, or sign-command.
           # macOS: APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
@@ -66,6 +88,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/release-notes.md
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
           path: packages
@@ -76,4 +102,8 @@ jobs:
         with:
           files: packages/*
           draft: true
+          # `v1.0.0-rc.1` and the like are marked as pre-releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          # Installation notes, followed by the generated list of changes.
+          body_path: .github/release-notes.md
           generate_release_notes: true

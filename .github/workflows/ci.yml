@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Also run by the release workflow before packaging.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always

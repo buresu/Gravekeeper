@@ -61,7 +61,7 @@ description = "Supervise and operate applications"
 long-description = "Starts, stops and restarts applications, captures their output, runs schedules, monitors resources and sends webhook notifications."
 category = "Utility"
 license-file = "../../LICENSE"
-before-packaging-command = "cargo build --release -p gravekeeper"
+before-packaging-command = "cargo build --release --locked -p gravekeeper"
 out-dir = "../../target/packages"
 icons = [
     "../../packaging/icons/32x32.png",
