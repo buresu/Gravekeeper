@@ -152,12 +152,17 @@ mod imp {
 }
 
 /// A value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+///
+/// Turning a startup app off in Task Manager or Settings keeps the `Run` value and records
+/// the choice under `Explorer\StartupApproved\Run` instead, so both keys are consulted.
 #[cfg(windows)]
 mod imp {
     use std::io;
     use std::path::Path;
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const APPROVED_KEY: &str =
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
     const VALUE: &str = "Gravekeeper";
 
     fn to_io(err: impl std::fmt::Display) -> io::Error {
@@ -168,7 +173,32 @@ mod imp {
         let Ok(key) = windows_registry::CURRENT_USER.open(RUN_KEY) else {
             return Ok(false);
         };
-        Ok(key.get_string(VALUE).is_ok())
+        Ok(key.get_string(VALUE).is_ok() && !disabled_by_user())
+    }
+
+    /// Whether the entry was turned off in Task Manager or Settings. The value is 12 bytes:
+    /// a flag whose low bit marks it disabled (02 on, 03 off), then when that happened.
+    fn disabled_by_user() -> bool {
+        windows_registry::CURRENT_USER
+            .open(APPROVED_KEY)
+            .and_then(|key| key.get_bytes(VALUE))
+            .is_ok_and(|bytes| bytes.first().is_some_and(|flag| flag & 1 == 1))
+    }
+
+    /// Removes the Task Manager / Settings choice; without it the entry counts as enabled.
+    fn clear_approval() -> io::Result<()> {
+        let Ok(key) = windows_registry::CURRENT_USER
+            .options()
+            .read()
+            .write()
+            .open(APPROVED_KEY)
+        else {
+            return Ok(());
+        };
+        if key.get_bytes(VALUE).is_ok() {
+            key.remove_value(VALUE).map_err(to_io)?;
+        }
+        Ok(())
     }
 
     pub fn enable(exe: &Path) -> io::Result<()> {
@@ -176,7 +206,8 @@ mod imp {
             .create(RUN_KEY)
             .map_err(to_io)?;
         let command = format!("\"{}\" {}", exe.display(), super::MINIMIZED_ARG);
-        key.set_string(VALUE, command).map_err(to_io)
+        key.set_string(VALUE, command).map_err(to_io)?;
+        clear_approval()
     }
 
     pub fn disable() -> io::Result<()> {
@@ -186,7 +217,7 @@ mod imp {
         if key.get_string(VALUE).is_ok() {
             key.remove_value(VALUE).map_err(to_io)?;
         }
-        Ok(())
+        clear_approval()
     }
 }
 
