@@ -28,6 +28,8 @@ allow = [
     "0BSD",
     "Unlicense",
     "Unicode-3.0",
+    # clipboard-win and error-code (arboard's Windows backend, via egui-winit).
+    "BSL-1.0",
     # Mozilla's root certificate data (webpki-root-certs, via rustls-platform-verifier).
     "CDLA-Permissive-2.0",
     # Fonts bundled by epaint (egui's default fonts).
