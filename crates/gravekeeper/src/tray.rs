@@ -1,3 +1,5 @@
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -29,18 +31,56 @@ pub fn host_available() -> bool {
     true
 }
 
+/// The tray icon; it disappears when this is dropped.
+pub struct Tray {
+    _icon: TrayIcon,
+    window_item: WindowItem,
+}
+
+impl Tray {
+    pub fn window_item(&self) -> WindowItem {
+        self.window_item.clone()
+    }
+}
+
+/// The menu entry that shows or hides the window. Only usable on the thread that created the
+/// tray.
+#[derive(Clone)]
+pub struct WindowItem {
+    item: MenuItem,
+    shown: Rc<Cell<bool>>,
+}
+
+impl WindowItem {
+    /// Labels the entry for the window's current state.
+    pub fn set_shown(&self, shown: bool) {
+        if self.shown.replace(shown) != shown {
+            self.item.set_text(window_item_label(shown));
+        }
+    }
+}
+
+fn window_item_label(shown: bool) -> &'static str {
+    if shown {
+        "Hide Gravekeeper"
+    } else {
+        "Show Gravekeeper"
+    }
+}
+
 /// Creates the tray icon and routes its events to `shell`.
 ///
 /// On Windows and macOS this must run on the main thread while the event loop is running.
 /// On Linux (ksni backend) it can run at any time; the tray lives on its own thread.
-pub fn create(shell: &Arc<Shell>) -> Result<TrayIcon, Box<dyn std::error::Error>> {
+pub fn create(shell: &Arc<Shell>) -> Result<Tray, Box<dyn std::error::Error>> {
     if !host_available() {
         return Err("no system tray host is running".into());
     }
-    let show = MenuItem::with_id("show", "Show Gravekeeper", true, None);
+    let shown = shell.window_shown();
+    let window = MenuItem::with_id("window", window_item_label(shown), true, None);
     let quit = MenuItem::with_id("quit", "Quit", true, None);
     let menu = Menu::new();
-    menu.append_items(&[&show, &PredefinedMenuItem::separator(), &quit])?;
+    menu.append_items(&[&window, &PredefinedMenuItem::separator(), &quit])?;
 
     let icon = tray_icon::Icon::from_rgba(crate::icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE)
         .expect("generated icon has a valid size");
@@ -56,7 +96,7 @@ pub fn create(shell: &Arc<Shell>) -> Result<TrayIcon, Box<dyn std::error::Error>
 
     let on_menu = Arc::clone(shell);
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| match event.id.as_ref() {
-        "show" => on_menu.handle(TrayAction::Show),
+        "window" => on_menu.handle(TrayAction::Toggle),
         "quit" => on_menu.handle(TrayAction::Quit),
         _ => {}
     }));
@@ -72,5 +112,11 @@ pub fn create(shell: &Arc<Shell>) -> Result<TrayIcon, Box<dyn std::error::Error>
         }
     }));
 
-    Ok(tray)
+    Ok(Tray {
+        _icon: tray,
+        window_item: WindowItem {
+            item: window,
+            shown: Rc::new(Cell::new(shown)),
+        },
+    })
 }

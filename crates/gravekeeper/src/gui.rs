@@ -7,7 +7,6 @@ use std::time::Instant;
 use eframe::egui;
 use gravekeeper_core::paths::Paths;
 use gravekeeper_core::{CoreHandle, StartError};
-use tray_icon::TrayIcon;
 
 use crate::shell::{CloseBehavior, Shell, TrayAction};
 use crate::{tray, ui};
@@ -61,7 +60,7 @@ pub fn run(paths: Paths, start_minimized: bool, process_started: Instant) -> Exi
     // process messages (`wait_for_tray` does that between windows), so there it can exist
     // before (and between) windows. On macOS it needs the running event loop, so it is created
     // with the window.
-    let mut tray: Option<TrayIcon> = None;
+    let mut tray: Option<tray::Tray> = None;
     if cfg!(any(target_os = "linux", windows)) {
         tray = create_tray(&shell, &mut options);
     }
@@ -80,7 +79,9 @@ pub fn run(paths: Paths, start_minimized: bool, process_started: Instant) -> Exi
             break Ok(());
         }
         match wait_for_tray(&wake_rx) {
-            Some(TrayAction::Show) => show_window = true,
+            Some(TrayAction::Show | TrayAction::Toggle) => show_window = true,
+            // The window closed before the request reached it.
+            Some(TrayAction::Hide) => show_window = false,
             Some(TrayAction::Quit) | None => break Ok(()),
         }
     };
@@ -96,7 +97,7 @@ pub fn run(paths: Paths, start_minimized: bool, process_started: Instant) -> Exi
     }
 }
 
-fn create_tray(shell: &Arc<Shell>, options: &mut Options) -> Option<TrayIcon> {
+fn create_tray(shell: &Arc<Shell>, options: &mut Options) -> Option<tray::Tray> {
     match tray::create(shell) {
         Ok(tray) => Some(tray),
         Err(err) => {
@@ -145,7 +146,7 @@ fn run_window(
     options: &Options,
     shell: &Arc<Shell>,
     core: &CoreHandle,
-    tray: &mut Option<TrayIcon>,
+    tray: &mut Option<tray::Tray>,
     process_started: Instant,
 ) -> eframe::Result {
     let icon = egui::IconData {
@@ -189,11 +190,15 @@ fn run_window(
                 core,
                 close,
                 start_hidden,
+                tray.as_ref().map(tray::Tray::window_item),
                 process_started,
             )))
         }),
     );
     shell.set_window_open(false);
+    if let Some(tray) = tray {
+        tray.window_item().set_shown(false);
+    }
     result
 }
 

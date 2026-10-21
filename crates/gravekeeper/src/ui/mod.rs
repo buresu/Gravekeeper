@@ -26,6 +26,7 @@ use gravekeeper_core::{Command, CoreHandle, Snapshot};
 use serde::{Deserialize, Serialize};
 
 use crate::shell::{CloseBehavior, Shell};
+use crate::tray::WindowItem;
 
 const STORAGE_KEY: &str = "gravekeeper.ui";
 
@@ -63,6 +64,8 @@ pub struct GravekeeperApp<'a> {
     settings: settings::SettingsView,
     confirm_quit: bool,
     logo: Option<egui::TextureHandle>,
+    /// The tray's show/hide entry, relabeled when the window is shown or hidden.
+    tray_window_item: Option<WindowItem>,
 }
 
 /// The startup time is only meaningful for the first window of the process.
@@ -75,6 +78,7 @@ impl<'a> GravekeeperApp<'a> {
         core: &'a CoreHandle,
         close: CloseBehavior,
         start_hidden: bool,
+        tray_window_item: Option<WindowItem>,
         process_started: Instant,
     ) -> Self {
         theme::install(&cc.egui_ctx);
@@ -83,7 +87,9 @@ impl<'a> GravekeeperApp<'a> {
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
             .unwrap_or_default();
         let mut app = Self::detached(core, close, process_started);
+        shell.set_window_shown(!start_hidden);
         app.shell = Some(shell);
+        app.tray_window_item = tray_window_item;
         app.restore(persisted);
         if start_hidden {
             // eframe shows the window once its first frame is painted, whatever the viewport
@@ -110,6 +116,7 @@ impl<'a> GravekeeperApp<'a> {
             settings: settings::SettingsView::default(),
             confirm_quit: false,
             logo: None,
+            tray_window_item: None,
         }
     }
 
@@ -127,6 +134,29 @@ impl<'a> GravekeeperApp<'a> {
 
     fn quit_requested(&self) -> bool {
         self.shell.as_ref().is_some_and(|s| s.quit_requested())
+    }
+
+    fn handle_close_request(&self, ctx: &egui::Context) {
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if !close_requested || self.quit_requested() {
+            return;
+        }
+        match self.close {
+            CloseBehavior::Hide => {
+                tracing::info!("window hidden to tray");
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                if let Some(shell) = &self.shell {
+                    shell.set_window_shown(false);
+                }
+            }
+            CloseBehavior::Destroy => tracing::info!("window closed; staying in tray"),
+            CloseBehavior::Quit => {
+                if let Some(shell) = &self.shell {
+                    shell.request_quit();
+                }
+            }
+        }
     }
 
     fn quit(&mut self, ctx: &egui::Context) {
@@ -276,22 +306,9 @@ impl<'a> GravekeeperApp<'a> {
 
 impl eframe::App for GravekeeperApp<'_> {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let close_requested = ctx.input(|i| i.viewport().close_requested());
-        if !close_requested || self.quit_requested() {
-            return;
-        }
-        match self.close {
-            CloseBehavior::Hide => {
-                tracing::info!("window hidden to tray");
-                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-            }
-            CloseBehavior::Destroy => tracing::info!("window closed; staying in tray"),
-            CloseBehavior::Quit => {
-                if let Some(shell) = &self.shell {
-                    shell.request_quit();
-                }
-            }
+        self.handle_close_request(ctx);
+        if let (Some(shell), Some(item)) = (&self.shell, &self.tray_window_item) {
+            item.set_shown(shell.window_shown());
         }
     }
 
