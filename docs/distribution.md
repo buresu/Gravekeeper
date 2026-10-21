@@ -44,11 +44,13 @@ If the run fails, fix the problem, move the tag to the fixed commit (`git tag -f
 
 ### Icons and desktop integration
 
-The icon is drawn in code (`crates/gravekeeper/src/icon.rs`) and used directly for the window and tray. Packaged icon files are generated from it and committed:
+The source artwork is `packaging/icons/1024x1024.png` (RGBA with a transparent background). The other packaged icon files are generated from it and committed:
 
 ```sh
-cargo run -p gravekeeper --example gen_icons   # writes packaging/icons/*.png, .ico, .icns
+cargo run -p gravekeeper --example gen_icons   # writes the smaller packaging/icons/*.png, .ico, .icns
 ```
+
+The window and tray icons are scaled at runtime from the embedded `256x256.png` (`crates/gravekeeper/src/icon.rs`). Scaling weights colors by alpha, so the transparent background never bleeds into the edges.
 
 - **Linux**: the desktop entry is `gravekeeper.desktop` with `StartupWMClass=gravekeeper`, matching the Wayland app id, so the window and task bar show the icon once the entry is installed (`.deb` or `install.sh`).
 - **Windows**: `build.rs` embeds `gravekeeper.ico` in the executable when building on Windows.

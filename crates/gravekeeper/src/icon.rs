@@ -1,94 +1,83 @@
-//! The Gravekeeper icon, drawn in code so no image decoder is needed at runtime.
+//! The Gravekeeper icon, scaled down from the artwork in `packaging/icons/`.
 //!
-//! The same function produces the window/tray icon and the packaged icon files
-//! (`cargo run -p gravekeeper --example gen_icons`).
+//! `packaging/icons/1024x1024.png` is the source; the other packaged icon files are
+//! generated from it (`cargo run -p gravekeeper --example gen_icons`). The window and
+//! tray icons are scaled at runtime from the embedded 256×256 PNG.
 
-/// Supersampling factor per axis for anti-aliased edges.
-const SAMPLES: u32 = 4;
+/// Embedded for the window and tray, which need at most 128×128.
+const EMBEDDED: &[u8] = include_bytes!("../../../packaging/icons/256x256.png");
 
-#[derive(Clone, Copy)]
-struct Rgb(f32, f32, f32);
-
-const STONE: Rgb = Rgb(0.62, 0.66, 0.71);
-const STONE_LIGHT: Rgb = Rgb(0.78, 0.81, 0.85);
-const OUTLINE: Rgb = Rgb(0.17, 0.19, 0.22);
-const CROSS: Rgb = Rgb(0.24, 0.27, 0.31);
-const GRASS: Rgb = Rgb(0.30, 0.62, 0.36);
-
-/// RGBA pixels (row-major, 4 bytes per pixel) of a `size`×`size` icon.
+/// RGBA pixels (row-major, 4 bytes per pixel) of a `size`×`size` icon, up to 256×256.
 pub fn rgba(size: u32) -> Vec<u8> {
+    let (pixels, src_size) = decode(EMBEDDED);
+    downscale(&pixels, src_size, size)
+}
+
+/// Decodes a square 8-bit RGBA PNG into its pixels and side length.
+pub fn decode(png_data: &[u8]) -> (Vec<u8>, u32) {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(png_data))
+        .read_info()
+        .expect("icon PNG header");
+    let mut pixels = vec![0; reader.output_buffer_size().expect("icon PNG size")];
+    let info = reader.next_frame(&mut pixels).expect("icon PNG data");
+    assert_eq!(
+        (info.color_type, info.bit_depth),
+        (png::ColorType::Rgba, png::BitDepth::Eight),
+        "icon PNG must be 8-bit RGBA"
+    );
+    assert_eq!(info.width, info.height, "icon PNG must be square");
+    pixels.truncate(info.buffer_size());
+    (pixels, info.width)
+}
+
+/// Scales square RGBA pixels down to `size`, averaging the source area each pixel covers.
+///
+/// Colors are weighted by alpha, so transparent pixels do not darken or lighten the edges.
+pub fn downscale(pixels: &[u8], src_size: u32, size: u32) -> Vec<u8> {
+    assert!(
+        size > 0 && size <= src_size,
+        "cannot scale {src_size} to {size}"
+    );
+    let spans: Vec<Vec<(usize, f64)>> = (0..size).map(|i| span(i, src_size, size)).collect();
     let mut out = Vec::with_capacity((size * size * 4) as usize);
-    let step = 1.0 / (size * SAMPLES) as f32;
-    for py in 0..size {
-        for px in 0..size {
-            let (mut r, mut g, mut b, mut a) = (0.0, 0.0, 0.0, 0.0);
-            for sy in 0..SAMPLES {
-                for sx in 0..SAMPLES {
-                    let x = (px * SAMPLES + sx) as f32 * step + step / 2.0;
-                    let y = (py * SAMPLES + sy) as f32 * step + step / 2.0;
-                    if let Some(Rgb(cr, cg, cb)) = shade(x, y) {
-                        r += cr;
-                        g += cg;
-                        b += cb;
-                        a += 1.0;
+    for ys in &spans {
+        for xs in &spans {
+            let mut sum = [0.0; 4];
+            for &(sy, wy) in ys {
+                for &(sx, wx) in xs {
+                    let p = &pixels[(sy * src_size as usize + sx) * 4..][..4];
+                    let a = f64::from(p[3]) * wx * wy;
+                    for c in 0..3 {
+                        sum[c] += f64::from(p[c]) * a;
                     }
+                    sum[3] += a;
                 }
             }
-            let n = (SAMPLES * SAMPLES) as f32;
             // Premultiplied average, converted back to straight alpha.
-            let (r, g, b) = if a > 0.0 {
-                (r / a, g / a, b / a)
-            } else {
-                (0.0, 0.0, 0.0)
-            };
-            let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-            out.extend_from_slice(&[to_u8(r), to_u8(g), to_u8(b), to_u8(a / n)]);
+            let a = sum[3];
+            let straight = |v: f64| if a > 0.0 { (v / a).round() as u8 } else { 0 };
+            out.extend_from_slice(&[
+                straight(sum[0]),
+                straight(sum[1]),
+                straight(sum[2]),
+                a.round().clamp(0.0, 255.0) as u8,
+            ]);
         }
     }
     out
 }
 
-/// Color at a point in the unit square, or `None` for transparent.
-fn shade(x: f32, y: f32) -> Option<Rgb> {
-    // Grass strip at the bottom.
-    if y > 0.84 && y < 0.95 && (x - 0.5).abs() < 0.44 {
-        return Some(GRASS);
-    }
-    // Tombstone: a rectangle with a semicircular top.
-    let (cx, half_w, top, bottom) = (0.5, 0.30, 0.10, 0.88);
-    let arch_y = top + half_w;
-    let inside = |inset: f32| {
-        let w = half_w - inset;
-        if y < arch_y {
-            (x - cx).powi(2) + (y - arch_y).powi(2) <= w * w
-        } else {
-            (x - cx).abs() <= w && y <= bottom - inset
-        }
-    };
-    if !inside(0.0) {
-        return None;
-    }
-    if !inside(0.035) {
-        return Some(OUTLINE);
-    }
-    // Engraved cross.
-    let bar = 0.045;
-    if ((x - cx).abs() < bar && y > 0.26 && y < 0.66)
-        || ((y - 0.38).abs() < bar && (x - cx).abs() < 0.15)
-    {
-        return Some(CROSS);
-    }
-    // Light from the upper left.
-    let t = ((x - 0.2) * 0.6 + (y - 0.1) * 0.8).clamp(0.0, 1.0);
-    Some(mix(STONE_LIGHT, STONE, t))
-}
-
-fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
-    Rgb(
-        a.0 + (b.0 - a.0) * t,
-        a.1 + (b.1 - a.1) * t,
-        a.2 + (b.2 - a.2) * t,
-    )
+/// Source pixels covered by output pixel `i`, with the fraction of the output pixel each covers.
+fn span(i: u32, src_size: u32, size: u32) -> Vec<(usize, f64)> {
+    let scale = f64::from(src_size) / f64::from(size);
+    let (start, end) = (f64::from(i) * scale, f64::from(i + 1) * scale);
+    (start.floor() as usize..end.ceil() as usize)
+        .map(|s| {
+            let covered = (s as f64 + 1.0).min(end) - (s as f64).max(start);
+            (s, covered / scale)
+        })
+        .filter(|&(_, w)| w > 0.0)
+        .collect()
 }
 
 #[cfg(test)]
@@ -102,8 +91,23 @@ mod tests {
         assert_eq!(px.len(), (size * size * 4) as usize);
         let alpha = |x: u32, y: u32| px[((y * size + x) * 4 + 3) as usize];
         assert_eq!(alpha(0, 0), 0);
-        assert_eq!(alpha(16, 20), 255);
+        assert_eq!(alpha(16, 16), 255);
         // Edges are anti-aliased: some pixels are partially covered.
         assert!(px.chunks(4).any(|p| p[3] > 0 && p[3] < 255));
+    }
+
+    #[test]
+    fn downscaling_ignores_the_color_of_transparent_pixels() {
+        // One opaque black pixel next to three transparent white ones.
+        let px = [
+            0, 0, 0, 255, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0,
+        ];
+        assert_eq!(downscale(&px, 2, 1), [0, 0, 0, 64]);
+    }
+
+    #[test]
+    fn downscaling_by_a_fractional_factor_keeps_full_coverage() {
+        let px = [200u8, 100, 50, 255].repeat(3 * 3);
+        assert_eq!(downscale(&px, 3, 2), [200, 100, 50, 255].repeat(2 * 2));
     }
 }
