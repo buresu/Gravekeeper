@@ -71,7 +71,14 @@ pub fn run(paths: Paths, start_minimized: bool, process_started: Instant) -> Exi
         || options.close == CloseBehavior::Quit;
     let result = loop {
         if show_window
-            && let Err(err) = run_window(&options, &shell, &core, &mut tray, process_started)
+            && let Err(err) = run_window(
+                &options,
+                &shell,
+                &core,
+                &mut tray,
+                &wake_rx,
+                process_started,
+            )
         {
             break Err(err);
         }
@@ -147,6 +154,7 @@ fn run_window(
     shell: &Arc<Shell>,
     core: &CoreHandle,
     tray: &mut Option<tray::Tray>,
+    wake_rx: &mpsc::Receiver<TrayAction>,
     process_started: Instant,
 ) -> eframe::Result {
     let icon = egui::IconData {
@@ -166,6 +174,11 @@ fn run_window(
     };
 
     shell.set_window_open(true);
+    // From here on tray actions go to the window. Whatever reached the main loop before is
+    // settled by opening it: a double click on the tray icon sends Show twice (on Windows both
+    // can arrive within one GetMessageW), and the leftover one would reopen the window as soon
+    // as it is closed.
+    while wake_rx.try_recv().is_ok() {}
     let mut close = options.close;
     let result = eframe::run_native_ext(
         "Gravekeeper",
