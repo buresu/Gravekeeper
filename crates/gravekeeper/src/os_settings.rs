@@ -16,6 +16,17 @@ pub(crate) fn set_automatic_updates(enabled: bool) -> io::Result<()> {
     imp::set_automatic_updates(enabled)
 }
 
+/// The account set to log in automatically, or `None` when automatic logon is off.
+pub fn auto_login() -> io::Result<Option<String>> {
+    imp::auto_login()
+}
+
+/// Needs administrator rights. When enabling, the elevated helper collects the password
+/// through the OS credential prompt; it is never passed in or stored in plain text.
+pub(crate) fn set_auto_login(enabled: bool) -> io::Result<()> {
+    imp::set_auto_login(enabled)
+}
+
 /// Turning automatic updates off works on every edition because it disables the Windows
 /// Update services (and their scheduled tasks); the group policy, which Windows Home ignores,
 /// is only an extra signal.
@@ -348,6 +359,376 @@ mod imp {
         }
         Ok(())
     }
+
+    // --- Automatic logon -----------------------------------------------------------------
+    //
+    // The user name and domain go in the Winlogon registry key; the password is kept as the
+    // LSA secret `DefaultPassword`, exactly as the Sysinternals Autologon tool does, never in
+    // the plain-text `DefaultPassword` registry value. The password is collected inside this
+    // elevated helper through the OS credential dialog, so it never reaches Gravekeeper's own
+    // process or the command line, and is validated with `LogonUser` before it is stored so a
+    // typo cannot lock the user out of interactive sign-in.
+
+    const WINLOGON_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon";
+    const AUTO_ADMIN_LOGON: &str = "AutoAdminLogon";
+    const DEFAULT_USER: &str = "DefaultUserName";
+    const DEFAULT_DOMAIN: &str = "DefaultDomainName";
+    /// The plain-text password value. We never create it, and remove it if something else did.
+    const DEFAULT_PASSWORD: &str = "DefaultPassword";
+    /// Windows 11 hides password sign-in (and ignores auto-logon) while this is 2; 0 re-enables
+    /// it. Saved and restored so the machine's original choice is not lost.
+    const PASSWORDLESS_KEY: &str =
+        r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\PasswordLess\Device";
+    const PASSWORDLESS_VALUE: &str = "DevicePasswordLessBuildVersion";
+    /// The LSA secret Winlogon reads the password from.
+    const LSA_SECRET: &str = "DefaultPassword";
+
+    pub fn auto_login() -> io::Result<Option<String>> {
+        let Ok(key) = LOCAL_MACHINE.open(WINLOGON_KEY) else {
+            return Ok(None);
+        };
+        let on = key
+            .get_string(AUTO_ADMIN_LOGON)
+            .is_ok_and(|value| value.trim() == "1");
+        if !on {
+            return Ok(None);
+        }
+        let user = key.get_string(DEFAULT_USER).unwrap_or_default();
+        Ok(Some(user))
+    }
+
+    pub fn set_auto_login(enabled: bool) -> io::Result<()> {
+        if enabled {
+            enable_auto_login()
+        } else {
+            disable_auto_login()
+        }
+    }
+
+    fn disable_auto_login() -> io::Result<()> {
+        let key = LOCAL_MACHINE
+            .create(WINLOGON_KEY)
+            .map_err(io::Error::from)?;
+        key.set_string(AUTO_ADMIN_LOGON, "0")
+            .map_err(io::Error::from)?;
+        // Never leave a plain-text password behind.
+        let _ = key.remove_value(DEFAULT_PASSWORD);
+        // Remove the stored secret.
+        lsa_store_password(None)?;
+        // Restore the passwordless setting we may have changed.
+        if let Some(previous) = read_backup_u32(PASSWORDLESS_BACKUP)? {
+            let _ = set_passwordless(previous);
+            clear_backup(PASSWORDLESS_BACKUP);
+        }
+        Ok(())
+    }
+
+    fn enable_auto_login() -> io::Result<()> {
+        let creds = prompt_credentials()?;
+        validate_credentials(&creds)?;
+
+        let key = LOCAL_MACHINE
+            .create(WINLOGON_KEY)
+            .map_err(io::Error::from)?;
+        key.set_string(AUTO_ADMIN_LOGON, "1")
+            .map_err(io::Error::from)?;
+        key.set_string(DEFAULT_USER, &creds.user)
+            .map_err(io::Error::from)?;
+        key.set_string(DEFAULT_DOMAIN, &creds.domain)
+            .map_err(io::Error::from)?;
+        // The password lives only in the LSA secret, never in this value.
+        let _ = key.remove_value(DEFAULT_PASSWORD);
+
+        // On Windows 11, allow password sign-in so auto-logon is honored (best-effort; save
+        // the old value so it can be put back).
+        if let Ok(Some(previous)) = read_u32(PASSWORDLESS_KEY, PASSWORDLESS_VALUE)
+            && previous != 0
+        {
+            let _ = save_backup(PASSWORDLESS_BACKUP, previous);
+            let _ = set_passwordless(0);
+        }
+
+        lsa_store_password(Some(&creds.password))?;
+        Ok(())
+    }
+
+    /// A backup value name (reuses the `BACKUP_KEY` store shared with the update settings).
+    const PASSWORDLESS_BACKUP: &str = "PasswordLessBuildVersion";
+
+    fn read_backup_u32(name: &str) -> io::Result<Option<u32>> {
+        read_u32(BACKUP_KEY, name)
+    }
+
+    fn set_passwordless(value: u32) -> io::Result<()> {
+        LOCAL_MACHINE
+            .create(PASSWORDLESS_KEY)
+            .and_then(|key| key.set_u32(PASSWORDLESS_VALUE, value))
+            .map_err(io::Error::from)
+    }
+
+    /// Credentials from the prompt. The password buffer is wiped when this is dropped.
+    struct Credentials {
+        user: String,
+        domain: String,
+        /// Null-terminated UTF-16, as the Win32 logon and LSA calls want it.
+        password: Vec<u16>,
+    }
+
+    impl Drop for Credentials {
+        fn drop(&mut self) {
+            self.password.iter_mut().for_each(|c| *c = 0);
+        }
+    }
+
+    /// Shows the OS "Windows Security" credential dialog and returns what was entered.
+    fn prompt_credentials() -> io::Result<Credentials> {
+        use std::ffi::c_void;
+
+        use windows::Win32::Foundation::{
+            ERROR_CANCELLED, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS,
+        };
+        use windows::Win32::Security::Credentials::{
+            CRED_PACK_GENERIC_CREDENTIALS, CREDUI_INFOW, CREDUIWIN_GENERIC,
+            CredUIPromptForWindowsCredentialsW, CredUnPackAuthenticationBufferW,
+        };
+        use windows::Win32::System::Com::CoTaskMemFree;
+        use windows::core::{HSTRING, PCWSTR, PWSTR};
+
+        let caption = HSTRING::from("Gravekeeper");
+        let message =
+            HSTRING::from("Enter the password of the account to sign in automatically at startup.");
+        let info = CREDUI_INFOW {
+            cbSize: size_of::<CREDUI_INFOW>() as u32,
+            pszCaptionText: PCWSTR(caption.as_ptr()),
+            pszMessageText: PCWSTR(message.as_ptr()),
+            ..Default::default()
+        };
+
+        let mut auth_package = 0u32;
+        let mut out_buffer: *mut c_void = std::ptr::null_mut();
+        let mut out_size = 0u32;
+
+        // SAFETY: `info` and its strings outlive the call; the out buffer is freed below.
+        let result = unsafe {
+            CredUIPromptForWindowsCredentialsW(
+                Some(&info),
+                0,
+                &mut auth_package,
+                None,
+                0,
+                &mut out_buffer,
+                &mut out_size,
+                None,
+                CREDUIWIN_GENERIC,
+            )
+        };
+        if result == ERROR_CANCELLED.0 {
+            return Err(io::Error::other("the password prompt was cancelled"));
+        }
+        if result != ERROR_SUCCESS.0 {
+            return Err(io::Error::from_raw_os_error(result as i32));
+        }
+
+        // Unpack: first call sizes the buffers, second fills them.
+        let mut user_len = 0u32;
+        let mut domain_len = 0u32;
+        let mut password_len = 0u32;
+        // SAFETY: a sizing call with null buffers; it reports the lengths it needs.
+        let _ = unsafe {
+            CredUnPackAuthenticationBufferW(
+                CRED_PACK_GENERIC_CREDENTIALS,
+                out_buffer,
+                out_size,
+                None,
+                &mut user_len,
+                None,
+                Some(&mut domain_len),
+                None,
+                &mut password_len,
+            )
+        };
+        let mut user = vec![0u16; user_len.max(1) as usize];
+        let mut domain = vec![0u16; domain_len.max(1) as usize];
+        let mut password = vec![0u16; password_len.max(1) as usize];
+        // SAFETY: the buffers are sized as the first call asked.
+        let unpacked = unsafe {
+            CredUnPackAuthenticationBufferW(
+                CRED_PACK_GENERIC_CREDENTIALS,
+                out_buffer,
+                out_size,
+                Some(PWSTR(user.as_mut_ptr())),
+                &mut user_len,
+                Some(PWSTR(domain.as_mut_ptr())),
+                Some(&mut domain_len),
+                Some(PWSTR(password.as_mut_ptr())),
+                &mut password_len,
+            )
+        };
+
+        // Wipe and free the system-allocated credential buffer whatever happened.
+        // SAFETY: `out_buffer`/`out_size` come from the prompt above and are freed once.
+        unsafe {
+            std::slice::from_raw_parts_mut(out_buffer.cast::<u8>(), out_size as usize).fill(0);
+            CoTaskMemFree(Some(out_buffer));
+        }
+
+        unpacked.map_err(|err| {
+            if io::Error::from(err.clone()).raw_os_error()
+                == Some(ERROR_INSUFFICIENT_BUFFER.0 as i32)
+            {
+                io::Error::other("could not read the entered credentials")
+            } else {
+                io::Error::from(err)
+            }
+        })?;
+
+        let entered = String::from_utf16_lossy(trim_nul(&user));
+        let typed_domain = String::from_utf16_lossy(trim_nul(&domain));
+        // Keep the password null-terminated for the Win32 calls that read it.
+        password.truncate(password_len as usize + 1);
+        if password.last() != Some(&0) {
+            password.push(0);
+        }
+
+        let (user, domain) = split_account(&entered, &typed_domain);
+        Ok(Credentials {
+            user,
+            domain,
+            password,
+        })
+    }
+
+    fn trim_nul(wide: &[u16]) -> &[u16] {
+        let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+        &wide[..end]
+    }
+
+    /// Splits what the dialog returned into the user name and domain Winlogon expects:
+    /// `DOMAIN\user`, a `user@domain` UPN (kept whole, domain blank), or a bare local name
+    /// (domain set to this computer).
+    fn split_account(entered: &str, typed_domain: &str) -> (String, String) {
+        if let Some((domain, user)) = entered.split_once('\\') {
+            (user.to_owned(), domain.to_owned())
+        } else if entered.contains('@') {
+            (entered.to_owned(), String::new())
+        } else if !typed_domain.is_empty() {
+            (entered.to_owned(), typed_domain.to_owned())
+        } else {
+            let computer = std::env::var("COMPUTERNAME").unwrap_or_default();
+            (entered.to_owned(), computer)
+        }
+    }
+
+    /// Confirms the password, so auto-logon is not set up with a wrong one. Only a clear
+    /// "wrong password" is fatal; account types `LogonUser` cannot check (e.g. Microsoft or
+    /// Entra accounts) are trusted, since the user just typed them into the OS dialog.
+    fn validate_credentials(creds: &Credentials) -> io::Result<()> {
+        use windows::Win32::Foundation::{CloseHandle, ERROR_LOGON_FAILURE, HANDLE};
+        use windows::Win32::Security::{
+            LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, LogonUserW,
+        };
+        use windows::core::{HSTRING, PCWSTR};
+
+        let user = HSTRING::from(&creds.user);
+        // A UPN (user@domain) carries its own domain; otherwise pass the parsed domain.
+        let domain = (!creds.domain.is_empty() && !creds.user.contains('@'))
+            .then(|| HSTRING::from(&creds.domain));
+        let domain_ptr = domain
+            .as_ref()
+            .map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr()));
+
+        let mut token = HANDLE::default();
+        // SAFETY: all string pointers outlive the call; a token handed back is closed below.
+        let result = unsafe {
+            LogonUserW(
+                PCWSTR(user.as_ptr()),
+                domain_ptr,
+                PCWSTR(creds.password.as_ptr()),
+                LOGON32_LOGON_INTERACTIVE,
+                LOGON32_PROVIDER_DEFAULT,
+                &mut token,
+            )
+        };
+        match result {
+            Ok(()) => {
+                if !token.is_invalid() {
+                    // SAFETY: a valid token handle from the successful logon.
+                    let _ = unsafe { CloseHandle(token) };
+                }
+                Ok(())
+            }
+            Err(err)
+                if io::Error::from(err.clone()).raw_os_error()
+                    == Some(ERROR_LOGON_FAILURE.0 as i32) =>
+            {
+                Err(io::Error::other("the password is incorrect"))
+            }
+            // Could not verify (e.g. a Microsoft account); trust the typed password.
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// Stores the auto-logon password as the LSA secret, or deletes it when `password` is
+    /// `None`.
+    fn lsa_store_password(password: Option<&[u16]>) -> io::Result<()> {
+        use windows::Win32::Foundation::NTSTATUS;
+        use windows::Win32::Security::Authentication::Identity::{
+            LSA_HANDLE, LSA_OBJECT_ATTRIBUTES, LSA_UNICODE_STRING, LsaClose, LsaNtStatusToWinError,
+            LsaOpenPolicy, LsaStorePrivateData, POLICY_CREATE_SECRET,
+        };
+        use windows::core::PWSTR;
+
+        fn lsa_string(buffer: &mut [u16]) -> LSA_UNICODE_STRING {
+            // Length counts the bytes before the trailing null; MaximumLength includes it.
+            let chars = buffer.len().saturating_sub(1);
+            LSA_UNICODE_STRING {
+                Length: (chars * 2) as u16,
+                MaximumLength: (buffer.len() * 2) as u16,
+                Buffer: PWSTR(buffer.as_mut_ptr()),
+            }
+        }
+
+        fn check(status: NTSTATUS) -> io::Result<()> {
+            if status.0 == 0 {
+                Ok(())
+            } else {
+                // SAFETY: pure translation of a status code.
+                let code = unsafe { LsaNtStatusToWinError(status) };
+                Err(io::Error::from_raw_os_error(code as i32))
+            }
+        }
+
+        let attributes = LSA_OBJECT_ATTRIBUTES::default();
+        let mut handle = LSA_HANDLE::default();
+        // SAFETY: a zeroed attributes struct is valid; the handle is closed below.
+        check(unsafe {
+            LsaOpenPolicy(None, &attributes, POLICY_CREATE_SECRET as u32, &mut handle)
+        })?;
+
+        let mut key: Vec<u16> = LSA_SECRET.encode_utf16().chain([0]).collect();
+        let key_str = lsa_string(&mut key);
+        let mut data = password.map(<[u16]>::to_vec);
+        let data_str = data.as_mut().map(|buffer| lsa_string(buffer));
+
+        // SAFETY: the key (and data, when present) outlive the call; `handle` is open.
+        let result = unsafe {
+            LsaStorePrivateData(
+                handle,
+                &key_str,
+                data_str.as_ref().map(|s| s as *const LSA_UNICODE_STRING),
+            )
+        };
+        // SAFETY: `handle` came from LsaOpenPolicy and is closed exactly once.
+        let _ = unsafe { LsaClose(handle) };
+        if let Some(buffer) = data.as_mut() {
+            buffer.iter_mut().for_each(|c| *c = 0);
+        }
+        match check(result) {
+            // Deleting a secret that is already gone is success.
+            Err(err) if password.is_none() && err.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -366,6 +747,14 @@ mod imp {
     }
 
     pub fn set_automatic_updates(_enabled: bool) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    pub fn auto_login() -> io::Result<Option<String>> {
+        Ok(None)
+    }
+
+    pub fn set_auto_login(_enabled: bool) -> io::Result<()> {
         Err(unsupported())
     }
 }

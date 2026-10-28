@@ -44,6 +44,10 @@ windows = { workspace = true, features = [
     # Starting and stopping the Windows Update services so a change takes effect at once.
     "Win32_System_Services",
     "Win32_UI_Shell",
+    # Automatic logon: the credential prompt, password validation and the LSA secret store.
+    "Win32_Security_Credentials",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Graphics_Gdi",
 ] }
 windows-registry.workspace = true
 

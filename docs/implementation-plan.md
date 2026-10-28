@@ -136,9 +136,10 @@ Requested before Phase 4: native file dialogs and a less dated look.
 - Screen capture, OS settings backup and restore
 - OS settings for unattended machines ([architecture.md](architecture.md#os-settings-and-administrator-rights)):
   - [x] Elevated helper (`gravekeeper elevated`): UAC, pkexec, osascript; closed set of tasks
-  - [x] Automatic updates on/off (Windows)
+  - [x] Automatic updates on/off (Windows: services, tasks, policy)
   - [ ] Automatic updates on Linux and macOS
-  - [ ] Automatic login (needs a channel for the password other than the command line)
+  - [x] Automatic login (Windows: Winlogon + LSA secret; password via the OS credential prompt, not the command line)
+  - [ ] Automatic login on Linux (display-manager config) and macOS (`kcpassword`)
   - [ ] Notifications (per user: applied without elevation)
   - [ ] Power settings (sleep, display off)
 - MCP server and a control API for AI agents (with allow lists, audit logs and access control)

@@ -12,9 +12,12 @@ use crate::os_settings;
 
 #[derive(Default)]
 pub struct SystemView {
-    /// Read from the OS once, and again after each change.
+    /// Read from the OS on first use, and again after each change. `None` means "re-read".
     automatic_updates: Option<Result<bool, String>>,
-    /// A change waiting for administrator approval and the elevated helper.
+    /// The auto-logon account, or `None` when it is off.
+    auto_login: Option<Result<Option<String>, String>>,
+    /// A change waiting for administrator approval and the elevated helper. Only one runs at a
+    /// time, so every control is disabled while it is set.
     elevation: Option<mpsc::Receiver<Result<(), elevate::Error>>>,
     error: Option<String>,
 }
@@ -33,17 +36,18 @@ impl SystemView {
             )),
         };
         self.elevation = None;
-        // Show what the OS has now, whatever happened.
+        // Re-read everything from the OS, whatever happened.
         self.automatic_updates = None;
+        self.auto_login = None;
         match result {
             Ok(()) | Err(elevate::Error::Cancelled) => self.error = None,
             Err(err) => self.error = Some(format!("Could not change the setting: {err}")),
         }
     }
 
-    fn elevate(&mut self, ctx: &egui::Context, tasks: Vec<Task>) {
+    fn elevate(&mut self, ctx: &egui::Context, task: Task) {
         let ctx = ctx.clone();
-        self.elevation = Some(elevate::spawn(tasks, move || ctx.request_repaint()));
+        self.elevation = Some(elevate::spawn(vec![task], move || ctx.request_repaint()));
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
@@ -81,35 +85,64 @@ impl SystemView {
                         ui,
                         "Automatic updates",
                         Some("When off, the OS no longer installs updates on its own; you can still update by hand."),
-                        |ui| {
-                            let state = self
-                                .automatic_updates
-                                .get_or_insert_with(|| {
-                                    os_settings::automatic_updates().map_err(|e| e.to_string())
-                                })
-                                .clone();
-                            match state {
-                                Ok(mut enabled) => {
-                                    if ui
-                                        .add_enabled(
-                                            !busy,
-                                            egui::Checkbox::new(&mut enabled, "Enabled"),
-                                        )
-                                        .changed()
-                                    {
-                                        self.elevate(
-                                            ui.ctx(),
-                                            vec![Task::AutomaticUpdates { enabled }],
-                                        );
-                                    }
-                                }
-                                Err(err) => {
-                                    ui.label(format!("Unavailable: {err}"));
-                                }
-                            }
-                        },
+                        |ui| self.updates_control(ui, busy),
+                    );
+                });
+
+                form::section(ui, "Sign-in", None, |ui| {
+                    form::row(
+                        ui,
+                        "Automatic logon",
+                        Some("Sign in to an account at startup without typing a password. You enter the password in a Windows prompt; it is stored by Windows, not by Gravekeeper."),
+                        |ui| self.auto_login_control(ui, busy),
                     );
                 });
             });
+    }
+
+    fn updates_control(&mut self, ui: &mut egui::Ui, busy: bool) {
+        let state = self
+            .automatic_updates
+            .get_or_insert_with(|| os_settings::automatic_updates().map_err(|e| e.to_string()))
+            .clone();
+        match state {
+            Ok(mut enabled) => {
+                if ui
+                    .add_enabled(!busy, egui::Checkbox::new(&mut enabled, "Enabled"))
+                    .changed()
+                {
+                    self.elevate(ui.ctx(), Task::AutomaticUpdates { enabled });
+                }
+            }
+            Err(err) => {
+                ui.label(format!("Unavailable: {err}"));
+            }
+        }
+    }
+
+    fn auto_login_control(&mut self, ui: &mut egui::Ui, busy: bool) {
+        let state = self
+            .auto_login
+            .get_or_insert_with(|| os_settings::auto_login().map_err(|e| e.to_string()))
+            .clone();
+        match state {
+            Ok(account) => {
+                let mut enabled = account.is_some();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!busy, egui::Checkbox::new(&mut enabled, "Enabled"))
+                        .changed()
+                    {
+                        self.elevate(ui.ctx(), Task::AutoLogin { enabled });
+                    }
+                    if let Some(user) = account.as_deref().filter(|u| !u.is_empty()) {
+                        widgets::hint(ui, &format!("as {user}"));
+                    }
+                });
+            }
+            Err(err) => {
+                ui.label(format!("Unavailable: {err}"));
+            }
+        }
     }
 }

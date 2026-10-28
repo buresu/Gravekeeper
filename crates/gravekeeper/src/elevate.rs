@@ -34,25 +34,27 @@ use crate::os_settings;
 pub enum Task {
     /// Turns automatic OS updates on (the OS default) or off.
     AutomaticUpdates { enabled: bool },
+    /// Turns automatic logon on or off. No password travels in the request: when enabling,
+    /// the elevated helper collects it through the OS credential prompt (see `os_settings`).
+    AutoLogin { enabled: bool },
 }
 
 impl Task {
     fn apply(&self) -> io::Result<()> {
         match *self {
             Task::AutomaticUpdates { enabled } => os_settings::set_automatic_updates(enabled),
+            Task::AutoLogin { enabled } => os_settings::set_auto_login(enabled),
         }
     }
 }
 
 impl fmt::Display for Task {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Task::AutomaticUpdates { enabled } => write!(
-                f,
-                "turning automatic updates {}",
-                if *enabled { "on" } else { "off" }
-            ),
-        }
+        let (what, enabled) = match self {
+            Task::AutomaticUpdates { enabled } => ("automatic updates", enabled),
+            Task::AutoLogin { enabled } => ("automatic logon", enabled),
+        };
+        write!(f, "turning {what} {}", if *enabled { "on" } else { "off" })
     }
 }
 
@@ -715,6 +717,7 @@ mod tests {
         let tasks = vec![
             Task::AutomaticUpdates { enabled: false },
             Task::AutomaticUpdates { enabled: true },
+            Task::AutoLogin { enabled: true },
         ];
         let request = encode(&tasks);
         assert!(request.bytes().all(|b| b.is_ascii_hexdigit()));
@@ -725,6 +728,8 @@ mod tests {
     fn tasks_have_a_stable_format() {
         let json = serde_json::to_string(&Task::AutomaticUpdates { enabled: false }).unwrap();
         assert_eq!(json, r#"{"task":"automatic-updates","enabled":false}"#);
+        let json = serde_json::to_string(&Task::AutoLogin { enabled: true }).unwrap();
+        assert_eq!(json, r#"{"task":"auto-login","enabled":true}"#);
     }
 
     #[test]
