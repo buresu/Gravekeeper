@@ -33,6 +33,7 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 | Hibernation on/off | ⏳ | ⏳ | 🧪 `powercfg /hibernate` (elevated) | ⏳ |
 | Notifications on/off | ⏳ | ⏳ | 🧪 per-user toast switch (no elevation) | ⏳ |
 | Windows Security notifications on/off | ⏳ | ⏳ | 🧪 Defender per-category (HKLM elevated + HKCU account protection) | ⏳ |
+| Firewall on/off | ⏳ | ⏳ | 🧪 `Set-NetFirewallProfile -Enabled` (elevated) | ⏳ |
 
 ## Limitations and notes
 

@@ -182,6 +182,10 @@ The master "Notifications" switch is per user, so turning it on or off needs no 
 
 **Windows Security notifications** (Microsoft Defender) are turned off per category, matching the Security app's own toggles rather than one master switch: virus &amp; threat protection (`SummaryNotificationDisabled`, `NoActionNotificationDisabled`, `FilesBlockedNotificationDisabled`) and the informational toggle (`Notifications\DisableEnhancedNotifications`) are HKLM registry values; the firewall "notify when an app is blocked" toggle goes through its own service, so it is set with `Set-NetFirewallProfile -NotifyOnListen` (a direct registry write is not applied live). These go through the elevated `SecurityNotifications` task. **Account protection notifications are per user (HKCU)**, so that part (`DisableNotifications`, `DisableWindowsHelloNotifications`, `DisableDynamiclockNotifications` under `HKCU\…\Account protection`) is written by `set_security_notifications_user` in Gravekeeper's own process — the elevated helper may run as a different account, whose HKCU is the wrong one. The System page applies the per-user part only after the elevated part succeeds.
 
+### Firewall (Windows)
+
+Turning the firewall itself on or off for all profiles is machine-wide, so it is an elevated `Firewall` task that runs `Set-NetFirewallProfile -Enabled True|False` (same reason as the firewall notification: the firewall service must apply it). The state is read without elevation from the per-profile `EnableFirewall` value (on unless every profile is 0). Turning the firewall off leaves the machine unprotected, so the System page labels it as such.
+
 ## Separate supervisor process (Phase 4)
 
 ```

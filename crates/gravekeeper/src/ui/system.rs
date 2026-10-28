@@ -29,6 +29,8 @@ pub struct SystemView {
     /// success, with the wanted value remembered here while the elevated change runs.
     security_notifications: Option<Result<bool, String>>,
     security_user_pending: Option<bool>,
+    /// Whether the firewall is on. Changed through `elevate`.
+    firewall: Option<Result<bool, String>>,
     /// A change waiting for administrator approval and the elevated helper. Only one runs at a
     /// time, so every control is disabled while it is set.
     elevation: Option<mpsc::Receiver<Result<(), elevate::Error>>>,
@@ -58,6 +60,7 @@ impl SystemView {
         self.hibernate = None;
         self.notifications = None;
         self.security_notifications = None;
+        self.firewall = None;
         match result {
             Ok(()) => {
                 self.error = None;
@@ -191,7 +194,36 @@ impl SystemView {
                         |ui| self.security_notif_control(ui, busy),
                     );
                 });
+
+                form::section(ui, "Firewall", None, |ui| {
+                    form::row(
+                        ui,
+                        "Microsoft Defender Firewall",
+                        Some("Turns the firewall on or off for all network profiles. Off leaves the computer unprotected; asks for administrator rights."),
+                        |ui| self.firewall_control(ui, busy),
+                    );
+                });
             });
+    }
+
+    fn firewall_control(&mut self, ui: &mut egui::Ui, busy: bool) {
+        let state = self
+            .firewall
+            .get_or_insert_with(|| os_settings::firewall_enabled().map_err(|e| e.to_string()))
+            .clone();
+        match state {
+            Ok(mut enabled) => {
+                if ui
+                    .add_enabled(!busy, egui::Checkbox::new(&mut enabled, "Enabled"))
+                    .changed()
+                {
+                    self.elevate(ui.ctx(), Task::Firewall { enabled });
+                }
+            }
+            Err(err) => {
+                ui.label(format!("Unavailable: {err}"));
+            }
+        }
     }
 
     fn security_notif_control(&mut self, ui: &mut egui::Ui, busy: bool) {

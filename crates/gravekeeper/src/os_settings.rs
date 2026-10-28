@@ -80,6 +80,17 @@ pub fn set_security_notifications_user(enabled: bool) -> io::Result<()> {
     imp::set_security_notifications_user(enabled)
 }
 
+/// Whether the firewall is on for any profile.
+pub fn firewall_enabled() -> io::Result<bool> {
+    imp::firewall_enabled()
+}
+
+/// Turns the firewall on or off for all profiles. Machine-wide, so needs administrator
+/// rights (goes through `elevate`).
+pub(crate) fn set_firewall(enabled: bool) -> io::Result<()> {
+    imp::set_firewall(enabled)
+}
+
 /// Needs administrator rights. When enabling, the elevated helper collects the password
 /// through the OS credential prompt; it is never passed in or stored in plain text.
 pub(crate) fn set_auto_login(enabled: bool) -> io::Result<()> {
@@ -1091,20 +1102,23 @@ mod imp {
         Ok(())
     }
 
-    /// Turns the firewall's blocked-app notification on or off for all profiles via
-    /// `Set-NetFirewallProfile`, so the firewall service applies it and the Security app
-    /// reflects it. Runs in the elevated helper.
+    /// Turns the firewall's blocked-app notification on or off for all profiles. Runs in the
+    /// elevated helper. `-NotifyOnListen` wants the GpoBoolean enum (True/False), not a
+    /// PowerShell boolean, so the bare word is passed, not `$true`/`$false`.
     fn set_firewall_notifications(enabled: bool) -> io::Result<()> {
+        let notify = if enabled { "True" } else { "False" };
+        run_firewall_cmdlet(&format!("-NotifyOnListen {notify}"))
+    }
+
+    /// Runs `Set-NetFirewallProfile` for all profiles with the given argument string, so the
+    /// firewall service applies the change and the Security app reflects it (a direct registry
+    /// write is not picked up live).
+    fn run_firewall_cmdlet(args: &str) -> io::Result<()> {
         use std::os::windows::process::CommandExt;
         use std::process::Command;
 
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        // `-NotifyOnListen` wants the GpoBoolean enum (True/False/NotConfigured), not a
-        // PowerShell boolean, so pass the bare word, not `$true`/`$false`.
-        let notify = if enabled { "True" } else { "False" };
-        let script = format!(
-            "Set-NetFirewallProfile -Profile Domain,Public,Private -NotifyOnListen {notify}"
-        );
+        let script = format!("Set-NetFirewallProfile -Profile Domain,Public,Private {args}");
         let status = Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .creation_flags(CREATE_NO_WINDOW)
@@ -1115,6 +1129,27 @@ mod imp {
         } else {
             Err(io::Error::other(format!("powershell exited with {status}")))
         }
+    }
+
+    // The firewall itself (all profiles). Machine-wide, so turning it on or off is elevated;
+    // the state is read without elevation from the per-profile `EnableFirewall` value.
+    const FIREWALL_BASE: &str =
+        r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy";
+    const FIREWALL_PROFILES: [&str; 3] = ["DomainProfile", "StandardProfile", "PublicProfile"];
+
+    pub fn firewall_enabled() -> io::Result<bool> {
+        // On if any profile's firewall is on; `EnableFirewall` defaults to on when absent.
+        for profile in FIREWALL_PROFILES {
+            if read_u32(&format!(r"{FIREWALL_BASE}\{profile}"), "EnableFirewall")? != Some(0) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn set_firewall(enabled: bool) -> io::Result<()> {
+        let value = if enabled { "True" } else { "False" };
+        run_firewall_cmdlet(&format!("-Enabled {value}"))
     }
 
     /// The per-user (HKCU) account-protection part; runs in Gravekeeper's own process so it
@@ -1259,6 +1294,14 @@ mod imp {
     }
 
     pub fn set_security_notifications_user(_enabled: bool) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    pub fn firewall_enabled() -> io::Result<bool> {
+        Err(unsupported())
+    }
+
+    pub fn set_firewall(_enabled: bool) -> io::Result<()> {
         Err(unsupported())
     }
 }

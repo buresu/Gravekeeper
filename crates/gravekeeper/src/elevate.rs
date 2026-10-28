@@ -41,6 +41,8 @@ pub enum Task {
     Hibernate { enabled: bool },
     /// Turns Windows Security (Defender) notifications on or off (machine-wide).
     SecurityNotifications { enabled: bool },
+    /// Turns the firewall on or off for all profiles (machine-wide).
+    Firewall { enabled: bool },
 }
 
 impl Task {
@@ -52,6 +54,7 @@ impl Task {
             Task::SecurityNotifications { enabled } => {
                 os_settings::set_security_notifications(enabled)
             }
+            Task::Firewall { enabled } => os_settings::set_firewall(enabled),
         }
     }
 }
@@ -63,6 +66,7 @@ impl fmt::Display for Task {
             Task::AutoLogin { enabled } => ("automatic logon", enabled),
             Task::Hibernate { enabled } => ("hibernation", enabled),
             Task::SecurityNotifications { enabled } => ("Windows Security notifications", enabled),
+            Task::Firewall { enabled } => ("the firewall", enabled),
         };
         write!(f, "turning {what} {}", if *enabled { "on" } else { "off" })
     }
@@ -730,6 +734,7 @@ mod tests {
             Task::AutoLogin { enabled: true },
             Task::Hibernate { enabled: false },
             Task::SecurityNotifications { enabled: false },
+            Task::Firewall { enabled: false },
         ];
         let request = encode(&tasks);
         assert!(request.bytes().all(|b| b.is_ascii_hexdigit()));
