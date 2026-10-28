@@ -806,6 +806,11 @@ mod imp {
     // standard user may change their own power timeouts, so these need no elevation. The
     // plugged-in (AC) and on-battery (DC) values are controlled together, and the values in
     // effect before a timeout was turned off are backed up under HKCU so they restore exactly.
+    //
+    // Read and written through the Power Management API, which is locale-independent:
+    // `PowerReadACValueIndex` / `PowerWriteACValueIndex` (and the DC pair) with
+    // `PowerSetActiveScheme` to apply. Applying the active scheme also makes the Settings app
+    // reflect the change, so no `powercfg` is needed here.
 
     use windows::core::GUID;
 
@@ -814,7 +819,8 @@ mod imp {
     const DEFAULT_DC_SECS: u32 = 15 * 60;
     const POWER_BACKUP_KEY: &str = r"SOFTWARE\Gravekeeper\Power";
 
-    /// A power timeout: its setting GUID and the HKCU value names its backup uses.
+    /// A power timeout: the GUID it is read and written by, and the HKCU value names its
+    /// backup uses.
     struct Timeout {
         setting: GUID,
         ac_backup: &'static str,
@@ -891,8 +897,7 @@ mod imp {
         use windows::Win32::System::Power::{
             PowerSetActiveScheme, PowerWriteACValueIndex, PowerWriteDCValueIndex,
         };
-        use windows::Win32::System::SystemServices::GUID_SLEEP_SUBGROUP;
-        use windows::Win32::System::SystemServices::GUID_VIDEO_SUBGROUP;
+        use windows::Win32::System::SystemServices::{GUID_SLEEP_SUBGROUP, GUID_VIDEO_SUBGROUP};
 
         let scheme = active_scheme()?;
         let subgroup = subgroup_of(&timeout.setting, &GUID_SLEEP_SUBGROUP, &GUID_VIDEO_SUBGROUP);
@@ -908,13 +913,30 @@ mod imp {
             let _ =
                 PowerWriteDCValueIndex(None, &scheme, Some(&subgroup), Some(&timeout.setting), dc);
         }
-        // The writes change the stored scheme; re-selecting it applies them to the live one.
+        // Re-selecting the active scheme applies the writes and makes the Settings app refresh.
         // SAFETY: `scheme` is the active scheme's own GUID.
         let err = unsafe { PowerSetActiveScheme(None, Some(&scheme)) };
         if err != ERROR_SUCCESS {
             return Err(io::Error::from_raw_os_error(err.0 as i32));
         }
         Ok(())
+    }
+
+    fn run_powercfg(args: &[&str]) -> io::Result<()> {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let status = Command::new("powercfg.exe")
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("powercfg exited with {status}")))
+        }
     }
 
     fn subgroup_of(setting: &GUID, sleep: &GUID, video: &GUID) -> GUID {
@@ -926,10 +948,29 @@ mod imp {
         }
     }
 
+    /// Whether this computer runs on a battery. A desktop (no battery) only ever applies the
+    /// AC timeout, so the on-battery (DC) value should be ignored when judging the state.
+    fn has_battery() -> bool {
+        use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+
+        let mut status = SYSTEM_POWER_STATUS::default();
+        // SAFETY: the call only fills the provided struct.
+        if unsafe { GetSystemPowerStatus(&mut status) }.is_ok() {
+            // BatteryFlag 128 (BATTERY_FLAG_NO_BATTERY) means no system battery.
+            status.BatteryFlag != 128
+        } else {
+            true
+        }
+    }
+
     fn timeout_on(timeout: &Timeout) -> io::Result<bool> {
         let (ac, dc) = read_timeout(timeout)?;
-        // In effect if either power source has a non-zero timeout.
-        Ok(ac != 0 || dc != 0)
+        // On a desktop only the AC timeout is ever applied, so judge by it alone.
+        Ok(if has_battery() {
+            ac != 0 || dc != 0
+        } else {
+            ac != 0
+        })
     }
 
     fn set_timeout(timeout: &Timeout, enabled: bool) -> io::Result<()> {
@@ -937,20 +978,18 @@ mod imp {
 
         if enabled {
             let key = CURRENT_USER.open(POWER_BACKUP_KEY);
-            let read = |name: &str, default: u32| {
-                key.as_ref()
-                    .ok()
-                    .and_then(|k| k.get_u32(name).ok())
-                    .unwrap_or(default)
+            // Turning a timeout on means a real wait, so a saved (or missing) "never" becomes
+            // the default rather than leaving it effectively off.
+            let restore = |name: &str, default: u32| match key
+                .as_ref()
+                .ok()
+                .and_then(|k| k.get_u32(name).ok())
+            {
+                Some(value) if value != 0 => value,
+                _ => default,
             };
-            let ac = read(timeout.ac_backup, DEFAULT_AC_SECS);
-            let dc = read(timeout.dc_backup, DEFAULT_DC_SECS);
-            // Avoid restoring "never" on both, which would leave the timeout effectively off.
-            let (ac, dc) = if ac == 0 && dc == 0 {
-                (DEFAULT_AC_SECS, DEFAULT_DC_SECS)
-            } else {
-                (ac, dc)
-            };
+            let ac = restore(timeout.ac_backup, DEFAULT_AC_SECS);
+            let dc = restore(timeout.dc_backup, DEFAULT_DC_SECS);
             write_timeout(timeout, ac, dc)?;
             if let Ok(key) = CURRENT_USER.options().read().write().open(POWER_BACKUP_KEY) {
                 let _ = key.remove_value(timeout.ac_backup);
@@ -1000,22 +1039,7 @@ mod imp {
     }
 
     pub fn set_hibernate(enabled: bool) -> io::Result<()> {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
-
-        // No console window flashes from the windowed helper process.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-        let status = Command::new("powercfg.exe")
-            .args(["/hibernate", if enabled { "on" } else { "off" }])
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdin(std::process::Stdio::null())
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!("powercfg exited with {status}")))
-        }
+        run_powercfg(&["/hibernate", if enabled { "on" } else { "off" }])
     }
 
     // --- Notifications -------------------------------------------------------------------
