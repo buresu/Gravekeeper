@@ -16,6 +16,12 @@ pub struct SystemView {
     automatic_updates: Option<Result<bool, String>>,
     /// The auto-logon account, or `None` when it is off.
     auto_login: Option<Result<Option<String>, String>>,
+    /// Whether the computer sleeps on its own. Changed in-process (no elevation).
+    automatic_sleep: Option<Result<bool, String>>,
+    /// Whether the display turns off on its own. Changed in-process (no elevation).
+    display_off: Option<Result<bool, String>>,
+    /// Whether hibernation is enabled. Changed through `elevate`.
+    hibernate: Option<Result<bool, String>>,
     /// A change waiting for administrator approval and the elevated helper. Only one runs at a
     /// time, so every control is disabled while it is set.
     elevation: Option<mpsc::Receiver<Result<(), elevate::Error>>>,
@@ -39,6 +45,9 @@ impl SystemView {
         // Re-read everything from the OS, whatever happened.
         self.automatic_updates = None;
         self.auto_login = None;
+        self.automatic_sleep = None;
+        self.display_off = None;
+        self.hibernate = None;
         match result {
             Ok(()) | Err(elevate::Error::Cancelled) => self.error = None,
             Err(err) => self.error = Some(format!("Could not change the setting: {err}")),
@@ -97,7 +106,68 @@ impl SystemView {
                         |ui| self.auto_login_control(ui, busy),
                     );
                 });
+
+                form::section(ui, "Power", None, |ui| {
+                    form::row(
+                        ui,
+                        "Automatic sleep",
+                        Some("When off, the computer never sleeps on its own. Needs no administrator rights."),
+                        |ui| {
+                            let cached = &mut self.automatic_sleep;
+                            direct_toggle(
+                                ui,
+                                busy,
+                                cached,
+                                os_settings::automatic_sleep,
+                                os_settings::set_automatic_sleep,
+                                &mut self.error,
+                            );
+                        },
+                    );
+                    form::row(
+                        ui,
+                        "Turn off the display",
+                        Some("When off, the display never turns off on its own. Needs no administrator rights."),
+                        |ui| {
+                            let cached = &mut self.display_off;
+                            direct_toggle(
+                                ui,
+                                busy,
+                                cached,
+                                os_settings::display_off,
+                                os_settings::set_display_off,
+                                &mut self.error,
+                            );
+                        },
+                    );
+                    form::row(
+                        ui,
+                        "Hibernation",
+                        Some("When off, the computer cannot hibernate and hiberfil.sys is freed. Asks for administrator rights."),
+                        |ui| self.hibernate_control(ui, busy),
+                    );
+                });
             });
+    }
+
+    fn hibernate_control(&mut self, ui: &mut egui::Ui, busy: bool) {
+        let state = self
+            .hibernate
+            .get_or_insert_with(|| os_settings::hibernate_enabled().map_err(|e| e.to_string()))
+            .clone();
+        match state {
+            Ok(mut enabled) => {
+                if ui
+                    .add_enabled(!busy, egui::Checkbox::new(&mut enabled, "Enabled"))
+                    .changed()
+                {
+                    self.elevate(ui.ctx(), Task::Hibernate { enabled });
+                }
+            }
+            Err(err) => {
+                ui.label(format!("Unavailable: {err}"));
+            }
+        }
     }
 
     fn updates_control(&mut self, ui: &mut egui::Ui, busy: bool) {
@@ -143,6 +213,39 @@ impl SystemView {
             Err(err) => {
                 ui.label(format!("Unavailable: {err}"));
             }
+        }
+    }
+}
+
+/// A checkbox for a setting applied in-process (no elevation): reads once, applies on change
+/// and re-reads. `cached` and `error` are distinct `SystemView` fields, passed separately.
+fn direct_toggle(
+    ui: &mut egui::Ui,
+    busy: bool,
+    cached: &mut Option<Result<bool, String>>,
+    read: fn() -> std::io::Result<bool>,
+    apply: fn(bool) -> std::io::Result<()>,
+    error: &mut Option<String>,
+) {
+    let state = cached
+        .get_or_insert_with(|| read().map_err(|e| e.to_string()))
+        .clone();
+    match state {
+        Ok(mut enabled) => {
+            // Disabled while an elevated change runs, to keep one change at a time.
+            if ui
+                .add_enabled(!busy, egui::Checkbox::new(&mut enabled, "Enabled"))
+                .changed()
+            {
+                match apply(enabled) {
+                    Ok(()) => *error = None,
+                    Err(err) => *error = Some(format!("Could not change the setting: {err}")),
+                }
+                *cached = None;
+            }
+        }
+        Err(err) => {
+            ui.label(format!("Unavailable: {err}"));
         }
     }
 }

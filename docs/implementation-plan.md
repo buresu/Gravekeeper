@@ -141,5 +141,8 @@ Requested before Phase 4: native file dialogs and a less dated look.
   - [x] Automatic login (Windows: Winlogon + LSA secret; password via the OS credential prompt, not the command line)
   - [ ] Automatic login on Linux (display-manager config) and macOS (`kcpassword`)
   - [ ] Notifications (per user: applied without elevation)
-  - [ ] Power settings (sleep, display off)
+  - [x] Power: automatic sleep on/off (Windows; no elevation, per-user power scheme)
+  - [x] Power: turn off the display on/off (Windows; no elevation)
+  - [x] Power: hibernation on/off (Windows; elevated, `powercfg /hibernate`)
+  - [ ] Power: Linux/macOS sleep and display settings
 - MCP server and a control API for AI agents (with allow lists, audit logs and access control)

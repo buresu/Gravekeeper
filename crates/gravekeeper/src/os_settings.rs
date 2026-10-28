@@ -21,6 +21,37 @@ pub fn auto_login() -> io::Result<Option<String>> {
     imp::auto_login()
 }
 
+/// Whether the computer sleeps on its own after a period of inactivity.
+pub fn automatic_sleep() -> io::Result<bool> {
+    imp::automatic_sleep()
+}
+
+/// Turns automatic sleep on or off. Unlike the other settings this needs no administrator
+/// rights — a standard user may change their own power timeouts — so it runs in-process.
+pub fn set_automatic_sleep(enabled: bool) -> io::Result<()> {
+    imp::set_automatic_sleep(enabled)
+}
+
+/// Whether the display turns off on its own after a period of inactivity.
+pub fn display_off() -> io::Result<bool> {
+    imp::display_off()
+}
+
+/// Turns the display-off timeout on or off. Needs no administrator rights (in-process).
+pub fn set_display_off(enabled: bool) -> io::Result<()> {
+    imp::set_display_off(enabled)
+}
+
+/// Whether hibernation is enabled on this computer.
+pub fn hibernate_enabled() -> io::Result<bool> {
+    imp::hibernate_enabled()
+}
+
+/// Enables or disables hibernation. Needs administrator rights (goes through `elevate`).
+pub(crate) fn set_hibernate(enabled: bool) -> io::Result<()> {
+    imp::set_hibernate(enabled)
+}
+
 /// Needs administrator rights. When enabling, the elevated helper collects the password
 /// through the OS credential prompt; it is never passed in or stored in plain text.
 pub(crate) fn set_auto_login(enabled: bool) -> io::Result<()> {
@@ -729,6 +760,224 @@ mod imp {
             other => other,
         }
     }
+
+    // --- Power timeouts (sleep, display off) ---------------------------------------------
+    //
+    // Each is a timeout on the active power scheme, in seconds, where 0 means "never". A
+    // standard user may change their own power timeouts, so these need no elevation. The
+    // plugged-in (AC) and on-battery (DC) values are controlled together, and the values in
+    // effect before a timeout was turned off are backed up under HKCU so they restore exactly.
+
+    use windows::core::GUID;
+
+    /// Windows defaults used only when turning a timeout on with nothing backed up.
+    const DEFAULT_AC_SECS: u32 = 30 * 60;
+    const DEFAULT_DC_SECS: u32 = 15 * 60;
+    const POWER_BACKUP_KEY: &str = r"SOFTWARE\Gravekeeper\Power";
+
+    /// A power timeout: its setting GUID and the HKCU value names its backup uses.
+    struct Timeout {
+        setting: GUID,
+        ac_backup: &'static str,
+        dc_backup: &'static str,
+    }
+
+    fn standby() -> Timeout {
+        use windows::Win32::System::SystemServices::GUID_STANDBY_TIMEOUT;
+        Timeout {
+            setting: GUID_STANDBY_TIMEOUT,
+            ac_backup: "StandbyAc",
+            dc_backup: "StandbyDc",
+        }
+    }
+
+    fn display() -> Timeout {
+        use windows::Win32::System::SystemServices::GUID_VIDEO_POWERDOWN_TIMEOUT;
+        Timeout {
+            setting: GUID_VIDEO_POWERDOWN_TIMEOUT,
+            ac_backup: "VideoAc",
+            dc_backup: "VideoDc",
+        }
+    }
+
+    /// The active power scheme's GUID, copied so the caller owns it.
+    fn active_scheme() -> io::Result<GUID> {
+        use windows::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
+        use windows::Win32::System::Power::PowerGetActiveScheme;
+
+        let mut active: *mut GUID = std::ptr::null_mut();
+        // SAFETY: `active` receives an allocation that we copy out of and then free.
+        let err = unsafe { PowerGetActiveScheme(None, &mut active) };
+        if err != ERROR_SUCCESS || active.is_null() {
+            return Err(io::Error::from_raw_os_error(err.0 as i32));
+        }
+        // SAFETY: `active` is a valid GUID allocation from the call above.
+        let scheme = unsafe { *active };
+        // SAFETY: the buffer was allocated by the Power API for us to LocalFree.
+        unsafe { LocalFree(Some(HLOCAL(active.cast()))) };
+        Ok(scheme)
+    }
+
+    fn read_timeout(timeout: &Timeout) -> io::Result<(u32, u32)> {
+        use windows::Win32::System::Power::{PowerReadACValueIndex, PowerReadDCValueIndex};
+        use windows::Win32::System::SystemServices::GUID_SLEEP_SUBGROUP;
+        use windows::Win32::System::SystemServices::GUID_VIDEO_SUBGROUP;
+
+        let scheme = active_scheme()?;
+        let subgroup = subgroup_of(&timeout.setting, &GUID_SLEEP_SUBGROUP, &GUID_VIDEO_SUBGROUP);
+        let mut ac = 0u32;
+        let mut dc = 0u32;
+        // SAFETY: all GUID pointers and the scheme outlive the calls.
+        unsafe {
+            let _ = PowerReadACValueIndex(
+                None,
+                Some(&scheme),
+                Some(&subgroup),
+                Some(&timeout.setting),
+                &mut ac,
+            );
+            let _ = PowerReadDCValueIndex(
+                None,
+                Some(&scheme),
+                Some(&subgroup),
+                Some(&timeout.setting),
+                &mut dc,
+            );
+        }
+        Ok((ac, dc))
+    }
+
+    fn write_timeout(timeout: &Timeout, ac: u32, dc: u32) -> io::Result<()> {
+        use windows::Win32::Foundation::ERROR_SUCCESS;
+        use windows::Win32::System::Power::{
+            PowerSetActiveScheme, PowerWriteACValueIndex, PowerWriteDCValueIndex,
+        };
+        use windows::Win32::System::SystemServices::GUID_SLEEP_SUBGROUP;
+        use windows::Win32::System::SystemServices::GUID_VIDEO_SUBGROUP;
+
+        let scheme = active_scheme()?;
+        let subgroup = subgroup_of(&timeout.setting, &GUID_SLEEP_SUBGROUP, &GUID_VIDEO_SUBGROUP);
+        // SAFETY: the scheme and GUIDs outlive the calls.
+        let err = unsafe {
+            PowerWriteACValueIndex(None, &scheme, Some(&subgroup), Some(&timeout.setting), ac)
+        };
+        if err != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(err.0 as i32));
+        }
+        // SAFETY: as above.
+        unsafe {
+            let _ =
+                PowerWriteDCValueIndex(None, &scheme, Some(&subgroup), Some(&timeout.setting), dc);
+        }
+        // The writes change the stored scheme; re-selecting it applies them to the live one.
+        // SAFETY: `scheme` is the active scheme's own GUID.
+        let err = unsafe { PowerSetActiveScheme(None, Some(&scheme)) };
+        if err != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(err.0 as i32));
+        }
+        Ok(())
+    }
+
+    fn subgroup_of(setting: &GUID, sleep: &GUID, video: &GUID) -> GUID {
+        use windows::Win32::System::SystemServices::GUID_STANDBY_TIMEOUT;
+        if *setting == GUID_STANDBY_TIMEOUT {
+            *sleep
+        } else {
+            *video
+        }
+    }
+
+    fn timeout_on(timeout: &Timeout) -> io::Result<bool> {
+        let (ac, dc) = read_timeout(timeout)?;
+        // In effect if either power source has a non-zero timeout.
+        Ok(ac != 0 || dc != 0)
+    }
+
+    fn set_timeout(timeout: &Timeout, enabled: bool) -> io::Result<()> {
+        use windows_registry::CURRENT_USER;
+
+        if enabled {
+            let key = CURRENT_USER.open(POWER_BACKUP_KEY);
+            let read = |name: &str, default: u32| {
+                key.as_ref()
+                    .ok()
+                    .and_then(|k| k.get_u32(name).ok())
+                    .unwrap_or(default)
+            };
+            let ac = read(timeout.ac_backup, DEFAULT_AC_SECS);
+            let dc = read(timeout.dc_backup, DEFAULT_DC_SECS);
+            // Avoid restoring "never" on both, which would leave the timeout effectively off.
+            let (ac, dc) = if ac == 0 && dc == 0 {
+                (DEFAULT_AC_SECS, DEFAULT_DC_SECS)
+            } else {
+                (ac, dc)
+            };
+            write_timeout(timeout, ac, dc)?;
+            if let Ok(key) = CURRENT_USER.options().read().write().open(POWER_BACKUP_KEY) {
+                let _ = key.remove_value(timeout.ac_backup);
+                let _ = key.remove_value(timeout.dc_backup);
+            }
+        } else {
+            let (ac, dc) = read_timeout(timeout)?;
+            // Save the current values (even "never") so turning it back on restores exactly.
+            if let Ok(key) = CURRENT_USER.create(POWER_BACKUP_KEY) {
+                let _ = key.set_u32(timeout.ac_backup, ac);
+                let _ = key.set_u32(timeout.dc_backup, dc);
+            }
+            write_timeout(timeout, 0, 0)?;
+        }
+        Ok(())
+    }
+
+    pub fn automatic_sleep() -> io::Result<bool> {
+        timeout_on(&standby())
+    }
+
+    pub fn set_automatic_sleep(enabled: bool) -> io::Result<()> {
+        set_timeout(&standby(), enabled)
+    }
+
+    pub fn display_off() -> io::Result<bool> {
+        timeout_on(&display())
+    }
+
+    pub fn set_display_off(enabled: bool) -> io::Result<()> {
+        set_timeout(&display(), enabled)
+    }
+
+    // --- Hibernation ---------------------------------------------------------------------
+    //
+    // Enabling or disabling hibernation is system-wide (it manages hiberfil.sys), so it needs
+    // administrator rights and runs in the elevated helper via `powercfg /hibernate on|off`,
+    // the supported way to toggle it. The state is read from the registry without elevation:
+    // `powercfg /hibernate off` sets `HibernateEnabled` to 0, so hibernation counts as off only
+    // when that value is present and zero.
+
+    const POWER_CONTROL_KEY: &str = r"SYSTEM\CurrentControlSet\Control\Power";
+    const HIBERNATE_ENABLED: &str = "HibernateEnabled";
+
+    pub fn hibernate_enabled() -> io::Result<bool> {
+        Ok(read_u32(POWER_CONTROL_KEY, HIBERNATE_ENABLED)? != Some(0))
+    }
+
+    pub fn set_hibernate(enabled: bool) -> io::Result<()> {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+
+        // No console window flashes from the windowed helper process.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        let status = Command::new("powercfg.exe")
+            .args(["/hibernate", if enabled { "on" } else { "off" }])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("powercfg exited with {status}")))
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -755,6 +1004,30 @@ mod imp {
     }
 
     pub fn set_auto_login(_enabled: bool) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    pub fn automatic_sleep() -> io::Result<bool> {
+        Err(unsupported())
+    }
+
+    pub fn set_automatic_sleep(_enabled: bool) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    pub fn display_off() -> io::Result<bool> {
+        Err(unsupported())
+    }
+
+    pub fn set_display_off(_enabled: bool) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    pub fn hibernate_enabled() -> io::Result<bool> {
+        Err(unsupported())
+    }
+
+    pub fn set_hibernate(_enabled: bool) -> io::Result<()> {
         Err(unsupported())
     }
 }

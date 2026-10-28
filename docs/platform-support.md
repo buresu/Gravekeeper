@@ -28,6 +28,9 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 | Administrator rights for OS settings | 🧪 pkexec | 🧪 same | ✅ UAC | 🧪 osascript |
 | Automatic updates on/off | ⏳ | ⏳ | ✅ Pro (services + policy); 🧪 Home (services only) | ⏳ |
 | Automatic logon on/off | ⏳ | ⏳ | 🧪 Winlogon + LSA secret (password via OS prompt) | ⏳ |
+| Automatic sleep on/off | ⏳ | ⏳ | 🧪 power scheme standby timeout (no elevation) | ⏳ |
+| Turn off display on/off | ⏳ | ⏳ | 🧪 power scheme video timeout (no elevation) | ⏳ |
+| Hibernation on/off | ⏳ | ⏳ | 🧪 `powercfg /hibernate` (elevated) | ⏳ |
 
 ## Limitations and notes
 
@@ -60,6 +63,8 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 
 - **Time zones**: jiff uses its bundled time zone database on Windows.
 - **Automatic logon**: the account goes in the Winlogon registry key and the password in the LSA secret `DefaultPassword` (never in plain text), as the Sysinternals Autologon tool does. The elevated helper asks for the password through the Windows credential dialog and validates it with `LogonUser` before saving. On Windows 11 it also sets `DevicePasswordLessBuildVersion = 0` (backed up) so password sign-in, and therefore auto-logon, is allowed. BitLocker without a TPM-only protector, or a Microsoft-account requirement to use Windows Hello, can still prevent it.
+- **Automatic sleep** and **turning off the display**: each controls the active power scheme's timeout (standby or video) for both AC and DC. "Off" sets both to never; the previous values are saved under `HKCU\SOFTWARE\Gravekeeper\Power` and restored when turned back on. No administrator rights are needed, matching the Settings app, where a standard user can change these timeouts.
+- **Hibernation**: turning it off runs `powercfg /hibernate off`, which disables hibernation and frees `hiberfil.sys`; turning it on runs `powercfg /hibernate on`. This is system-wide and needs administrator rights. The state is read from `HibernateEnabled` in the registry.
 - **Automatic updates**: turning them off disables the Windows Update services (`wuauserv`, `UsoSvc`, `WaaSMedicSvc`) by setting their `Start` to 4, and on Pro and above also sets two group policies: `NoAutoUpdate = 1` ("Configure Automatic Updates" = Disabled) and `SetDisableUXWUAccess = 1` ("Remove access to use all Windows Update features"). The services make this work on Home too, where the policy is ignored. The original `Start` values are saved under `HKLM\SOFTWARE\Gravekeeper\WindowsUpdate` and restored when updates are turned back on (falling back to the Windows defaults if no backup is found).
   - The visible effect in the Settings page comes from the policies, not the services: `SetDisableUXWUAccess` is what makes "Windows Update" show as managed and blocks the manual "Check for updates". Stopping the services alone changes behaviour but not that page. Both policies only apply on editions that honor them (Pro and above).
   - `WaaSMedicSvc` is the "medic" that otherwise revives `wuauserv`; its security descriptor grants stop and config rights to the Administrators group (verified on Windows 11 Home), so it is disabled as a service rather than by renaming its DLL.

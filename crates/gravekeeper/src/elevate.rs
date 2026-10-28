@@ -37,6 +37,8 @@ pub enum Task {
     /// Turns automatic logon on or off. No password travels in the request: when enabling,
     /// the elevated helper collects it through the OS credential prompt (see `os_settings`).
     AutoLogin { enabled: bool },
+    /// Enables or disables hibernation (system-wide; manages hiberfil.sys).
+    Hibernate { enabled: bool },
 }
 
 impl Task {
@@ -44,6 +46,7 @@ impl Task {
         match *self {
             Task::AutomaticUpdates { enabled } => os_settings::set_automatic_updates(enabled),
             Task::AutoLogin { enabled } => os_settings::set_auto_login(enabled),
+            Task::Hibernate { enabled } => os_settings::set_hibernate(enabled),
         }
     }
 }
@@ -53,6 +56,7 @@ impl fmt::Display for Task {
         let (what, enabled) = match self {
             Task::AutomaticUpdates { enabled } => ("automatic updates", enabled),
             Task::AutoLogin { enabled } => ("automatic logon", enabled),
+            Task::Hibernate { enabled } => ("hibernation", enabled),
         };
         write!(f, "turning {what} {}", if *enabled { "on" } else { "off" })
     }
@@ -718,6 +722,7 @@ mod tests {
             Task::AutomaticUpdates { enabled: false },
             Task::AutomaticUpdates { enabled: true },
             Task::AutoLogin { enabled: true },
+            Task::Hibernate { enabled: false },
         ];
         let request = encode(&tasks);
         assert!(request.bytes().all(|b| b.is_ascii_hexdigit()));

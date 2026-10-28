@@ -48,6 +48,9 @@ windows = { workspace = true, features = [
     "Win32_Security_Credentials",
     "Win32_Security_Authentication_Identity",
     "Win32_Graphics_Gdi",
+    # Automatic sleep: reading and writing the active power scheme's standby timeout.
+    "Win32_System_Power",
+    "Win32_System_SystemServices",
 ] }
 windows-registry.workspace = true
 
