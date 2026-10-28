@@ -26,7 +26,7 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 | Boot time (`boot_delay`, after-boot schedules) | ✅ | ✅ | 🧪 | 🧪 |
 | Log files and rotation | ✅ | ✅ | 🧪 | 🧪 |
 | Administrator rights for OS settings | 🧪 pkexec | 🧪 same | ✅ UAC | 🧪 osascript |
-| Automatic updates on/off | ⏳ | ⏳ | ✅ policy (not on Windows Home) | ⏳ |
+| Automatic updates on/off | ⏳ | ⏳ | ✅ Pro (services + policy); 🧪 Home (services only) | ⏳ |
 
 ## Limitations and notes
 
@@ -58,7 +58,12 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 - **Service**: `gravekeeper service install` is not supported yet; use "Launch at login".
 
 - **Time zones**: jiff uses its bundled time zone database on Windows.
-- **Automatic updates**: turning them off sets the "Configure Automatic Updates" policy to Disabled (`NoAutoUpdate = 1`); turning them on removes the value again. Windows Home ignores the policy, so the setting is shown as unavailable there. A domain group policy can override it.
+- **Automatic updates**: turning them off disables the Windows Update services (`wuauserv`, `UsoSvc`, `WaaSMedicSvc`) by setting their `Start` to 4, and on Pro and above also sets two group policies: `NoAutoUpdate = 1` ("Configure Automatic Updates" = Disabled) and `SetDisableUXWUAccess = 1` ("Remove access to use all Windows Update features"). The services make this work on Home too, where the policy is ignored. The original `Start` values are saved under `HKLM\SOFTWARE\Gravekeeper\WindowsUpdate` and restored when updates are turned back on (falling back to the Windows defaults if no backup is found).
+  - The visible effect in the Settings page comes from the policies, not the services: `SetDisableUXWUAccess` is what makes "Windows Update" show as managed and blocks the manual "Check for updates". Stopping the services alone changes behaviour but not that page. Both policies only apply on editions that honor them (Pro and above).
+  - `WaaSMedicSvc` is the "medic" that otherwise revives `wuauserv`; its security descriptor grants stop and config rights to the Administrators group (verified on Windows 11 Home), so it is disabled as a service rather than by renaming its DLL.
+  - To take effect without a reboot, the running services are also stopped (or started again). This is best-effort: on a typical machine the UAC administrator can stop all three, but a build that locks one to SYSTEM/TrustedInstaller refuses. Either way the `Start` change takes full effect at the next boot.
+  - The Windows Update **scheduled tasks** (under `\Microsoft\Windows\WindowsUpdate`, `UpdateOrchestrator`, `UpdateAssistant`, `InstallService`, `WaaSMedic` and `\Microsoft\WindowsUpdate`) are disabled too, so the tasks cannot re-start the services. The tasks actually disabled are recorded under `HKLM\SOFTWARE\Gravekeeper\WindowsUpdate\DisabledTasks` and only those are re-enabled when updates are turned back on. This runs through PowerShell's `ScheduledTasks` module and is best-effort: some tasks are owned by SYSTEM/TrustedInstaller and cannot be disabled by the UAC administrator.
+  - Nothing is renamed, deleted or has its ownership changed, so the change is fully reversible and does not break Windows servicing. A domain group policy can still override the setting.
 
 ### macOS
 

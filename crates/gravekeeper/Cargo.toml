@@ -41,6 +41,8 @@ windows = { workspace = true, features = [
     "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_System_Registry",
+    # Starting and stopping the Windows Update services so a change takes effect at once.
+    "Win32_System_Services",
     "Win32_UI_Shell",
 ] }
 windows-registry.workspace = true
