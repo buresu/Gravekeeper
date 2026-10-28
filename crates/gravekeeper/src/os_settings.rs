@@ -52,6 +52,16 @@ pub(crate) fn set_hibernate(enabled: bool) -> io::Result<()> {
     imp::set_hibernate(enabled)
 }
 
+/// Whether notifications (toasts) are shown for the current user.
+pub fn notifications_enabled() -> io::Result<bool> {
+    imp::notifications_enabled()
+}
+
+/// Turns notifications on or off for the current user. Needs no administrator rights.
+pub fn set_notifications(enabled: bool) -> io::Result<()> {
+    imp::set_notifications(enabled)
+}
+
 /// Needs administrator rights. When enabling, the elevated helper collects the password
 /// through the OS credential prompt; it is never passed in or stored in plain text.
 pub(crate) fn set_auto_login(enabled: bool) -> io::Result<()> {
@@ -978,6 +988,101 @@ mod imp {
             Err(io::Error::other(format!("powercfg exited with {status}")))
         }
     }
+
+    // --- Notifications -------------------------------------------------------------------
+    //
+    // The master "Notifications" switch is per user (HKCU), so this needs no elevation. The
+    // Settings app's toggle is `NOC_GLOBAL_SETTING_TOASTS_ENABLED`; `PushNotifications
+    // \ToastEnabled` is the toast gate the notification platform also checks, so both are set
+    // together. Notifications are on by default, so they count as off only when the master
+    // value is explicitly 0.
+
+    const NOTIF_SETTINGS_KEY: &str =
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings";
+    const NOC_GLOBAL: &str = "NOC_GLOBAL_SETTING_TOASTS_ENABLED";
+    const PUSH_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications";
+    const TOAST_ENABLED: &str = "ToastEnabled";
+
+    /// The two "Additional settings" switches on the notifications page: Windows tips and the
+    /// "finish setting up this device" suggestions. Read directly from the registry by the
+    /// Settings app, so no service restart is needed for them.
+    const CDM_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager";
+    const TIPS_VALUE: &str = "SubscribedContent-338389Enabled";
+    const UPE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement";
+    const SCOOBE_VALUE: &str = "ScoobeSystemSettingEnabled";
+
+    fn read_hkcu_u32(key_path: &str, value: &str) -> io::Result<Option<u32>> {
+        use windows_registry::CURRENT_USER;
+        match CURRENT_USER
+            .open(key_path)
+            .and_then(|key| key.get_u32(value))
+        {
+            Ok(found) => Ok(Some(found)),
+            Err(err) => {
+                let err = io::Error::from(err);
+                if err.kind() == io::ErrorKind::NotFound {
+                    Ok(None)
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    pub fn notifications_enabled() -> io::Result<bool> {
+        Ok(read_hkcu_u32(NOTIF_SETTINGS_KEY, NOC_GLOBAL)? != Some(0))
+    }
+
+    pub fn set_notifications(enabled: bool) -> io::Result<()> {
+        use windows_registry::CURRENT_USER;
+
+        let value = u32::from(enabled);
+        CURRENT_USER
+            .create(NOTIF_SETTINGS_KEY)
+            .and_then(|key| key.set_u32(NOC_GLOBAL, value))
+            .map_err(io::Error::from)?;
+        // The toast gate as well, so toasts are actually suppressed when off.
+        if let Ok(key) = CURRENT_USER.create(PUSH_KEY) {
+            let _ = key.set_u32(TOAST_ENABLED, value);
+        }
+        // The "Additional settings" suggestion switches on the same page, so turning
+        // notifications off also silences Windows tips and setup suggestions.
+        if let Ok(key) = CURRENT_USER.create(CDM_KEY) {
+            let _ = key.set_u32(TIPS_VALUE, value);
+        }
+        if let Ok(key) = CURRENT_USER.create(UPE_KEY) {
+            let _ = key.set_u32(SCOOBE_VALUE, value);
+        }
+        // The notification platform keeps the live state in WNF and only reads these values
+        // at start-up, so the registry write alone changes neither the Settings page nor the
+        // actual behavior. Restarting the per-user service makes it re-read them. Best-effort:
+        // the registry is the durable part, applied at the next sign-in regardless.
+        let _ = restart_notification_service();
+        Ok(())
+    }
+
+    /// Restarts the current session's `WpnUserService` instance (a per-user service, so no
+    /// elevation is needed). Its instance name carries a session suffix, so PowerShell's
+    /// wildcard find-and-restart is simpler than enumerating services by hand.
+    fn restart_notification_service() -> io::Result<()> {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const SCRIPT: &str = "Get-Service -Name 'WpnUserService*' -ErrorAction SilentlyContinue | \
+             Restart-Service -Force -ErrorAction SilentlyContinue";
+
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("powershell exited with {status}")))
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -1028,6 +1133,14 @@ mod imp {
     }
 
     pub fn set_hibernate(_enabled: bool) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    pub fn notifications_enabled() -> io::Result<bool> {
+        Err(unsupported())
+    }
+
+    pub fn set_notifications(_enabled: bool) -> io::Result<()> {
         Err(unsupported())
     }
 }

@@ -22,6 +22,8 @@ pub struct SystemView {
     display_off: Option<Result<bool, String>>,
     /// Whether hibernation is enabled. Changed through `elevate`.
     hibernate: Option<Result<bool, String>>,
+    /// Whether notifications are shown. Changed in-process (no elevation).
+    notifications: Option<Result<bool, String>>,
     /// A change waiting for administrator approval and the elevated helper. Only one runs at a
     /// time, so every control is disabled while it is set.
     elevation: Option<mpsc::Receiver<Result<(), elevate::Error>>>,
@@ -48,6 +50,7 @@ impl SystemView {
         self.automatic_sleep = None;
         self.display_off = None;
         self.hibernate = None;
+        self.notifications = None;
         match result {
             Ok(()) | Err(elevate::Error::Cancelled) => self.error = None,
             Err(err) => self.error = Some(format!("Could not change the setting: {err}")),
@@ -145,6 +148,25 @@ impl SystemView {
                         "Hibernation",
                         Some("When off, the computer cannot hibernate and hiberfil.sys is freed. Asks for administrator rights."),
                         |ui| self.hibernate_control(ui, busy),
+                    );
+                });
+
+                form::section(ui, "Notifications", None, |ui| {
+                    form::row(
+                        ui,
+                        "Notifications",
+                        Some("When off, apps show no notifications for this user, including Windows tips and setup suggestions. Needs no administrator rights."),
+                        |ui| {
+                            let cached = &mut self.notifications;
+                            direct_toggle(
+                                ui,
+                                busy,
+                                cached,
+                                os_settings::notifications_enabled,
+                                os_settings::set_notifications,
+                                &mut self.error,
+                            );
+                        },
                     );
                 });
             });

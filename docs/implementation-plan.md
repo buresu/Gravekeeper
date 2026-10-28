@@ -140,7 +140,7 @@ Requested before Phase 4: native file dialogs and a less dated look.
   - [ ] Automatic updates on Linux and macOS
   - [x] Automatic login (Windows: Winlogon + LSA secret; password via the OS credential prompt, not the command line)
   - [ ] Automatic login on Linux (display-manager config) and macOS (`kcpassword`)
-  - [ ] Notifications (per user: applied without elevation)
+  - [x] Notifications on/off (Windows; per-user, no elevation)
   - [x] Power: automatic sleep on/off (Windows; no elevation, per-user power scheme)
   - [x] Power: turn off the display on/off (Windows; no elevation)
   - [x] Power: hibernation on/off (Windows; elevated, `powercfg /hibernate`)
