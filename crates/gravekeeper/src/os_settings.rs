@@ -62,6 +62,24 @@ pub fn set_notifications(enabled: bool) -> io::Result<()> {
     imp::set_notifications(enabled)
 }
 
+/// Whether Windows Security (Defender) shows its notifications.
+pub fn security_notifications_enabled() -> io::Result<bool> {
+    imp::security_notifications_enabled()
+}
+
+/// Turns the machine-wide part of Windows Security notifications on or off. Needs
+/// administrator rights (goes through `elevate`). The per-user account-protection part is
+/// [`set_security_notifications_user`], applied in-process.
+pub(crate) fn set_security_notifications(enabled: bool) -> io::Result<()> {
+    imp::set_security_notifications(enabled)
+}
+
+/// The per-user account-protection part of the Windows Security notifications setting.
+/// Needs no administrator rights and must run in the signed-in user's process.
+pub fn set_security_notifications_user(enabled: bool) -> io::Result<()> {
+    imp::set_security_notifications_user(enabled)
+}
+
 /// Needs administrator rights. When enabling, the elevated helper collects the password
 /// through the OS credential prompt; it is never passed in or stored in plain text.
 pub(crate) fn set_auto_login(enabled: bool) -> io::Result<()> {
@@ -1033,6 +1051,94 @@ mod imp {
         Ok(read_hkcu_u32(NOTIF_SETTINGS_KEY, NOC_GLOBAL)? != Some(0))
     }
 
+    // Windows Security (Defender) notifications. Each category sets its own `*Disabled` flags
+    // rather than one master switch, which matches the Security app's own toggles. Most live
+    // under HKLM (machine-wide, so they go through the elevated helper), but **account
+    // protection is per user (HKCU)**, so that part must be written by the user's own process,
+    // not the elevated helper, which may run as a different account — see
+    // `set_security_notifications_user`.
+
+    const WSC_VIRUS_KEY: &str =
+        r"SOFTWARE\Microsoft\Windows Defender Security Center\Virus and threat protection";
+    const WSC_NOTIF_KEY: &str =
+        r"SOFTWARE\Microsoft\Windows Defender Security Center\Notifications";
+    const ENHANCED_NOTIFICATIONS: &str = "DisableEnhancedNotifications";
+    /// Account protection, under HKCU.
+    const WSC_ACCOUNT_KEY: &str =
+        r"Software\Microsoft\Windows Defender Security Center\Account protection";
+
+    pub fn security_notifications_enabled() -> io::Result<bool> {
+        // The informational-notifications flag is set together with the rest, so it stands in
+        // for the whole group.
+        Ok(read_u32(WSC_NOTIF_KEY, ENHANCED_NOTIFICATIONS)? != Some(1))
+    }
+
+    /// The machine-wide (HKLM) part; runs in the elevated helper.
+    pub fn set_security_notifications(enabled: bool) -> io::Result<()> {
+        // `set_policy_value(key, value, on)` writes 1 when `on` (i.e. disabled), else removes.
+        let disable = !enabled;
+        for value in [
+            "SummaryNotificationDisabled",
+            "NoActionNotificationDisabled",
+            "FilesBlockedNotificationDisabled",
+        ] {
+            set_policy_value(WSC_VIRUS_KEY, value, disable)?;
+        }
+        set_policy_value(WSC_NOTIF_KEY, ENHANCED_NOTIFICATIONS, disable)?;
+        // The firewall "notify when an app is blocked" toggle goes through the firewall
+        // service (a direct registry write is not picked up live), so use its cmdlet.
+        set_firewall_notifications(enabled)?;
+        Ok(())
+    }
+
+    /// Turns the firewall's blocked-app notification on or off for all profiles via
+    /// `Set-NetFirewallProfile`, so the firewall service applies it and the Security app
+    /// reflects it. Runs in the elevated helper.
+    fn set_firewall_notifications(enabled: bool) -> io::Result<()> {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // `-NotifyOnListen` wants the GpoBoolean enum (True/False/NotConfigured), not a
+        // PowerShell boolean, so pass the bare word, not `$true`/`$false`.
+        let notify = if enabled { "True" } else { "False" };
+        let script = format!(
+            "Set-NetFirewallProfile -Profile Domain,Public,Private -NotifyOnListen {notify}"
+        );
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("powershell exited with {status}")))
+        }
+    }
+
+    /// The per-user (HKCU) account-protection part; runs in Gravekeeper's own process so it
+    /// lands in the signed-in user's profile, not the elevating administrator's.
+    pub fn set_security_notifications_user(enabled: bool) -> io::Result<()> {
+        use windows_registry::CURRENT_USER;
+
+        let key = CURRENT_USER
+            .create(WSC_ACCOUNT_KEY)
+            .map_err(io::Error::from)?;
+        for value in [
+            "DisableNotifications",
+            "DisableWindowsHelloNotifications",
+            "DisableDynamiclockNotifications",
+        ] {
+            if enabled {
+                let _ = key.remove_value(value);
+            } else {
+                key.set_u32(value, 1).map_err(io::Error::from)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_notifications(enabled: bool) -> io::Result<()> {
         use windows_registry::CURRENT_USER;
 
@@ -1141,6 +1247,18 @@ mod imp {
     }
 
     pub fn set_notifications(_enabled: bool) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    pub fn security_notifications_enabled() -> io::Result<bool> {
+        Err(unsupported())
+    }
+
+    pub fn set_security_notifications(_enabled: bool) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    pub fn set_security_notifications_user(_enabled: bool) -> io::Result<()> {
         Err(unsupported())
     }
 }

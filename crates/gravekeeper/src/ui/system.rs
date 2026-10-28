@@ -24,6 +24,11 @@ pub struct SystemView {
     hibernate: Option<Result<bool, String>>,
     /// Whether notifications are shown. Changed in-process (no elevation).
     notifications: Option<Result<bool, String>>,
+    /// Whether Windows Security notifications are shown. The machine-wide part is changed
+    /// through `elevate`; the per-user account-protection part is applied in-process on
+    /// success, with the wanted value remembered here while the elevated change runs.
+    security_notifications: Option<Result<bool, String>>,
+    security_user_pending: Option<bool>,
     /// A change waiting for administrator approval and the elevated helper. Only one runs at a
     /// time, so every control is disabled while it is set.
     elevation: Option<mpsc::Receiver<Result<(), elevate::Error>>>,
@@ -44,6 +49,7 @@ impl SystemView {
             )),
         };
         self.elevation = None;
+        let security_user = self.security_user_pending.take();
         // Re-read everything from the OS, whatever happened.
         self.automatic_updates = None;
         self.auto_login = None;
@@ -51,8 +57,18 @@ impl SystemView {
         self.display_off = None;
         self.hibernate = None;
         self.notifications = None;
+        self.security_notifications = None;
         match result {
-            Ok(()) | Err(elevate::Error::Cancelled) => self.error = None,
+            Ok(()) => {
+                self.error = None;
+                // Apply the per-user part only once the elevated part succeeded.
+                if let Some(enabled) = security_user
+                    && let Err(err) = os_settings::set_security_notifications_user(enabled)
+                {
+                    self.error = Some(format!("Could not change the setting: {err}"));
+                }
+            }
+            Err(elevate::Error::Cancelled) => self.error = None,
             Err(err) => self.error = Some(format!("Could not change the setting: {err}")),
         }
     }
@@ -168,8 +184,39 @@ impl SystemView {
                             );
                         },
                     );
+                    form::row(
+                        ui,
+                        "Windows Security notifications",
+                        Some("When off, Microsoft Defender / Windows Security shows no notifications. Asks for administrator rights."),
+                        |ui| self.security_notif_control(ui, busy),
+                    );
                 });
             });
+    }
+
+    fn security_notif_control(&mut self, ui: &mut egui::Ui, busy: bool) {
+        let state = self
+            .security_notifications
+            .get_or_insert_with(|| {
+                os_settings::security_notifications_enabled().map_err(|e| e.to_string())
+            })
+            .clone();
+        match state {
+            Ok(mut enabled) => {
+                if ui
+                    .add_enabled(!busy, egui::Checkbox::new(&mut enabled, "Enabled"))
+                    .changed()
+                {
+                    // The per-user part is applied in poll_elevation once the elevated
+                    // (machine-wide) part succeeds.
+                    self.security_user_pending = Some(enabled);
+                    self.elevate(ui.ctx(), Task::SecurityNotifications { enabled });
+                }
+            }
+            Err(err) => {
+                ui.label(format!("Unavailable: {err}"));
+            }
+        }
     }
 
     fn hibernate_control(&mut self, ui: &mut egui::Ui, busy: bool) {

@@ -39,6 +39,8 @@ pub enum Task {
     AutoLogin { enabled: bool },
     /// Enables or disables hibernation (system-wide; manages hiberfil.sys).
     Hibernate { enabled: bool },
+    /// Turns Windows Security (Defender) notifications on or off (machine-wide).
+    SecurityNotifications { enabled: bool },
 }
 
 impl Task {
@@ -47,6 +49,9 @@ impl Task {
             Task::AutomaticUpdates { enabled } => os_settings::set_automatic_updates(enabled),
             Task::AutoLogin { enabled } => os_settings::set_auto_login(enabled),
             Task::Hibernate { enabled } => os_settings::set_hibernate(enabled),
+            Task::SecurityNotifications { enabled } => {
+                os_settings::set_security_notifications(enabled)
+            }
         }
     }
 }
@@ -57,6 +62,7 @@ impl fmt::Display for Task {
             Task::AutomaticUpdates { enabled } => ("automatic updates", enabled),
             Task::AutoLogin { enabled } => ("automatic logon", enabled),
             Task::Hibernate { enabled } => ("hibernation", enabled),
+            Task::SecurityNotifications { enabled } => ("Windows Security notifications", enabled),
         };
         write!(f, "turning {what} {}", if *enabled { "on" } else { "off" })
     }
@@ -723,6 +729,7 @@ mod tests {
             Task::AutomaticUpdates { enabled: true },
             Task::AutoLogin { enabled: true },
             Task::Hibernate { enabled: false },
+            Task::SecurityNotifications { enabled: false },
         ];
         let request = encode(&tasks);
         assert!(request.bytes().all(|b| b.is_ascii_hexdigit()));
