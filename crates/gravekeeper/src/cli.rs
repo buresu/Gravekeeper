@@ -11,11 +11,18 @@ usage:
   gravekeeper --version
   gravekeeper --help";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
-    Gui { minimized: bool },
+    Gui {
+        minimized: bool,
+    },
     Headless,
     Service(ServiceCommand),
+    /// The elevated helper Gravekeeper starts itself (`elevate.rs`); not listed in the usage.
+    Elevated {
+        request: String,
+        report: Option<String>,
+    },
     Help,
     Version,
 }
@@ -37,6 +44,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Mode, String> {
         ["service", "install"] => Ok(Mode::Service(ServiceCommand::Install)),
         ["service", "uninstall"] => Ok(Mode::Service(ServiceCommand::Uninstall)),
         ["service", "status"] => Ok(Mode::Service(ServiceCommand::Status)),
+        ["elevated", request] => Ok(Mode::Elevated {
+            request: (*request).to_owned(),
+            report: None,
+        }),
+        ["elevated", request, "--report", pipe] => Ok(Mode::Elevated {
+            request: (*request).to_owned(),
+            report: Some((*pipe).to_owned()),
+        }),
         ["--help" | "-h"] => Ok(Mode::Help),
         ["--version" | "-V"] => Ok(Mode::Version),
         _ => Err(format!("unrecognized arguments: {}", args.join(" "))),
@@ -61,6 +76,14 @@ mod tests {
             Ok(Mode::Service(ServiceCommand::Status))
         );
         assert_eq!(parse_str("-V"), Ok(Mode::Version));
+        assert_eq!(
+            parse_str(r"elevated 5b5d --report \\.\pipe\p"),
+            Ok(Mode::Elevated {
+                request: "5b5d".into(),
+                report: Some(r"\\.\pipe\p".into())
+            })
+        );
+        assert!(parse_str("elevated").is_err());
         assert!(parse_str("service").is_err());
         assert!(parse_str("--headless --minimized").is_err());
     }

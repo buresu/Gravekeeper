@@ -1,4 +1,5 @@
-//! General, appearance, monitoring and logging settings.
+//! Gravekeeper's own settings: startup, appearance, monitoring and logging. Settings of the
+//! computer itself are on the System page (`system.rs`).
 
 use std::path::Path;
 

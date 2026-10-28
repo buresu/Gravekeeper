@@ -14,6 +14,8 @@ egui_extras.workspace = true
 jiff.workspace = true
 rfd.workspace = true
 serde.workspace = true
+# Requests and reports of the elevated helper.
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter", "ansi"] }
 tray-icon.workspace = true
@@ -23,13 +25,24 @@ png = "0.18"
 tokio = { workspace = true, features = ["rt", "signal", "macros"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
 zbus.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
+windows = { workspace = true, features = [
+    "Win32_UI_WindowsAndMessaging",
+    # The elevated helper: UAC, the report pipe and the token query.
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+] }
 windows-registry.workspace = true
 
 [dev-dependencies]

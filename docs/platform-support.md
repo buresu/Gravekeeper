@@ -25,6 +25,8 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 | CPU / memory / disk monitoring | ✅ | ✅ | 🧪 | 🧪 |
 | Boot time (`boot_delay`, after-boot schedules) | ✅ | ✅ | 🧪 | 🧪 |
 | Log files and rotation | ✅ | ✅ | 🧪 | 🧪 |
+| Administrator rights for OS settings | 🧪 pkexec | 🧪 same | ✅ UAC | 🧪 osascript |
+| Automatic updates on/off | ⏳ | ⏳ | ✅ policy (not on Windows Home) | ⏳ |
 
 ## Limitations and notes
 
@@ -56,6 +58,7 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 - **Service**: `gravekeeper service install` is not supported yet; use "Launch at login".
 
 - **Time zones**: jiff uses its bundled time zone database on Windows.
+- **Automatic updates**: turning them off sets the "Configure Automatic Updates" policy to Disabled (`NoAutoUpdate = 1`); turning them on removes the value again. Windows Home ignores the policy, so the setting is shown as unavailable there. A domain group policy can override it.
 
 ### macOS
 

@@ -164,6 +164,7 @@ fn every_page_renders_in_the_sidebar_navigation() {
         "Schedules",
         "Notifications",
         "Events",
+        "System",
         "Settings",
         "Dashboard",
     ] {
@@ -198,6 +199,7 @@ fn screenshots() {
         (Tab::Schedules, "schedules"),
         (Tab::Notifications, "notifications"),
         (Tab::Events, "events"),
+        (Tab::System, "system"),
         (Tab::Settings, "settings"),
     ];
     for (theme, theme_name) in [(egui::Theme::Dark, "dark"), (egui::Theme::Light, "light")] {

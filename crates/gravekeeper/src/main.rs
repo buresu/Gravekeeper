@@ -2,9 +2,11 @@
 
 mod autostart;
 mod cli;
+mod elevate;
 mod gui;
 mod headless;
 mod icon;
+mod os_settings;
 mod service;
 mod shell;
 mod tray;
@@ -42,6 +44,10 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Mode::Service(command) => return service::run(command),
+        // Before logging starts: the helper must not write to the user's data directory.
+        Mode::Elevated { request, report } => {
+            return elevate::helper(&request, report.as_deref());
+        }
         Mode::Gui { .. } | Mode::Headless => {}
     }
 
@@ -57,7 +63,9 @@ fn main() -> ExitCode {
     match mode {
         Mode::Headless => headless::run(paths),
         Mode::Gui { minimized } => gui::run(paths, minimized, process_started),
-        Mode::Help | Mode::Version | Mode::Service(_) => unreachable!("handled above"),
+        Mode::Help | Mode::Version | Mode::Service(_) | Mode::Elevated { .. } => {
+            unreachable!("handled above")
+        }
     }
 }
 

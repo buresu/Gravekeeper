@@ -10,6 +10,7 @@ mod schedules;
 #[cfg(test)]
 mod screenshots;
 mod settings;
+mod system;
 pub mod theme;
 mod webhooks;
 mod widgets;
@@ -38,6 +39,7 @@ pub enum Tab {
     Schedules,
     Notifications,
     Events,
+    System,
     Settings,
 }
 
@@ -61,6 +63,7 @@ pub struct GravekeeperApp<'a> {
     schedules: schedules::SchedulesView,
     webhooks: webhooks::WebhooksView,
     events: events::EventsView,
+    system: system::SystemView,
     settings: settings::SettingsView,
     confirm_quit: bool,
     logo: Option<egui::TextureHandle>,
@@ -113,6 +116,7 @@ impl<'a> GravekeeperApp<'a> {
             schedules: schedules::SchedulesView::default(),
             webhooks: webhooks::WebhooksView::default(),
             events: events::EventsView::default(),
+            system: system::SystemView::default(),
             settings: settings::SettingsView::default(),
             confirm_quit: false,
             logo: None,
@@ -243,6 +247,7 @@ impl<'a> GravekeeperApp<'a> {
             ),
             (Tab::Notifications, icons::BELL, "Notifications", 0),
             (Tab::Events, icons::LIST, "Events", 0),
+            (Tab::System, icons::CPU, "System", 0),
             (Tab::Settings, icons::GEAR, "Settings", 0),
         ] {
             if widgets::nav_item(ui, icon, label, self.tab == tab, badge).clicked() {
@@ -378,6 +383,7 @@ impl eframe::App for GravekeeperApp<'_> {
                     Tab::Schedules => self.schedules.show(ui, self.core, &snapshot),
                     Tab::Notifications => self.webhooks.show(ui, self.core, &snapshot),
                     Tab::Events => self.events.show(ui, &snapshot),
+                    Tab::System => self.system.show(ui),
                     Tab::Settings => self.settings.show(ui, self.core, &snapshot),
                 }
             });

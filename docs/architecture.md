@@ -147,6 +147,25 @@ What closing the main window does (`CloseBehavior`) has a per-OS default.
 
 `autostart.rs` registers the GUI (with `--minimized`) in the user's session: an XDG autostart `.desktop` file on Linux, a LaunchAgent plist on macOS, and an `HKCU\…\Run` value on Windows. The state shown in Settings is read from the OS, not stored in the configuration. Running the supervisor as an OS service before login is a separate feature (Phase 3).
 
+## OS settings and administrator rights
+
+`os_settings.rs` reads and changes OS settings for machines that run unattended (so far: automatic updates, through the Windows "Configure Automatic Updates" policy). They are kept apart from Gravekeeper's own settings: the System page (`ui/system.rs`) shows them, the Settings page only Gravekeeper's. Values are read from the OS (which needs no special rights) and never stored in the configuration file.
+
+Gravekeeper itself never runs elevated: it installs per user, launch at login (`HKCU\…\Run`) does not start programs that need elevation, and supervised applications would inherit the rights. Machine-wide changes go through `elevate.rs` instead, which starts the same executable as `gravekeeper elevated <request>` through the OS's consent prompt, only for as long as the change takes:
+
+| | Prompt | Report back |
+|---|---|---|
+| Windows | UAC (`ShellExecuteExW` with `runas`) | Named pipe `\\.\pipe\gravekeeper-elevated-…` created by Gravekeeper (first instance only, local clients only); only the helper's process ID is accepted as the client, and the helper opens it with `SECURITY_IDENTIFICATION` so it cannot be impersonated |
+| Linux | polkit (`pkexec`); an AppImage runs the `.AppImage` file, since root cannot read its FUSE mount | stdout |
+| macOS | `osascript` `do shell script … with administrator privileges` | stdout (the script's result) |
+
+- A request is a list of `Task`s, a closed set of operations with typed parameters. It never names a command, file or registry path, and unknown tasks are rejected, so the helper is not a general way to run something as an administrator.
+- The request is hex-encoded JSON on the command line, which cannot be changed after the process starts. Command lines are readable by other processes, so a request must never contain a secret (a future auto-login password needs a different channel).
+- The report is `{"Ok":null}` or `{"Err":"…"}`. The helper does not log, so that it never creates files owned by another account in the user's data directory.
+- Per-user settings (e.g. `HKCU`) must not be changed by the helper: when a standard user approves with an administrator's credentials, the helper runs as that administrator.
+- If Gravekeeper already runs elevated (or as root), tasks are applied in-process.
+- `elevate::spawn` runs the request on its own thread, so the GUI keeps drawing while the prompt is open.
+
 ## Separate supervisor process (Phase 4)
 
 ```
