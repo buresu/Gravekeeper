@@ -145,6 +145,6 @@ Requested before Phase 4: native file dialogs and a less dated look.
   - [x] Firewall on/off (Windows; elevated, all profiles)
   - [x] Power: automatic sleep on/off (Windows; no elevation, per-user power scheme. Linux: KDE PowerDevil, GNOME gsettings)
   - [x] Power: turn off the display on/off (Windows; no elevation. Linux: KDE PowerDevil, GNOME gsettings)
-  - [x] Power: hibernation on/off (Windows; elevated, `powercfg /hibernate`)
+  - [x] Power: hibernation on/off (Windows; elevated, `powercfg /hibernate`. Linux: elevated, systemd `sleep.conf.d` drop-in)
   - [ ] Power: macOS sleep and display settings
 - MCP server and a control API for AI agents (with allow lists, audit logs and access control)

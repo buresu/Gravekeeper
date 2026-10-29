@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 fn unsupported() -> io::Error {
@@ -431,6 +431,106 @@ pub fn set_notifications(enabled: bool) -> io::Result<()> {
     }
 }
 
+// --- Hibernation -----------------------------------------------------------------------------
+//
+// System-wide, so it is changed by the elevated helper: a drop-in in `/etc/systemd/sleep.conf.d`
+// sets `AllowHibernation=no`, along with the two modes that hibernate as part of them, and
+// logind then reports hibernation as unavailable to the desktop. Turning it on removes the
+// drop-in. The state is the effective `AllowHibernation`, read without elevation from the
+// merged configuration that `systemd-analyze cat-config` prints.
+//
+// Unlike Windows nothing is freed: the swap space used to hibernate is left as it is.
+
+const SLEEP_DROP_INS: &str = "/etc/systemd/sleep.conf.d";
+const HIBERNATE_DROP_IN: &str = "90-gravekeeper-hibernation.conf";
+
+fn hibernate_drop_in(allow: bool) -> String {
+    let value = if allow { "yes" } else { "no" };
+    format!(
+        "# Written by Gravekeeper (System > Hibernation). Delete this file to undo.\n\
+         [Sleep]\n\
+         AllowHibernation={value}\n\
+         AllowSuspendThenHibernate={value}\n\
+         AllowHybridSleep={value}\n"
+    )
+}
+
+/// systemd's boolean spellings; `None` for anything else, which systemd ignores.
+fn parse_systemd_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "yes" | "y" | "true" | "t" | "on" => Some(true),
+        "0" | "no" | "n" | "false" | "f" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// The effective `AllowHibernation` of a merged `sleep.conf`: the last valid assignment in a
+/// `[Sleep]` section wins, and hibernation is allowed by default.
+fn allows_hibernation(config: &str) -> bool {
+    let mut section = "";
+    let mut allowed = true;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with(['#', ';']) {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            section = name;
+        } else if section == "Sleep"
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "AllowHibernation"
+            && let Some(value) = parse_systemd_bool(value.trim())
+        {
+            allowed = value;
+        }
+    }
+    allowed
+}
+
+pub fn hibernate_enabled() -> io::Result<bool> {
+    let config = run("systemd-analyze", &["cat-config", "systemd/sleep.conf"])?;
+    Ok(allows_hibernation(&config))
+}
+
+pub fn set_hibernate(enabled: bool) -> io::Result<()> {
+    set_hibernate_in(Path::new(SLEEP_DROP_INS), enabled, hibernate_enabled)
+}
+
+/// `effective` reads the resulting state, for when removing the drop-in is not enough.
+fn set_hibernate_in(
+    dir: &Path,
+    enabled: bool,
+    effective: impl FnOnce() -> io::Result<bool>,
+) -> io::Result<()> {
+    let path = dir.join(HIBERNATE_DROP_IN);
+    if enabled {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+        // Still off: other configuration forbids it, which turning it on overrides.
+        if !effective()? {
+            write_config_file(&path, &hibernate_drop_in(true))?;
+        }
+        Ok(())
+    } else {
+        write_config_file(&path, &hibernate_drop_in(false))
+    }
+}
+
+/// Writes a world-readable configuration file atomically, creating its directory.
+fn write_config_file(path: &Path, contents: &str) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let temp = path.with_extension("tmp");
+    std::fs::write(&temp, contents)?;
+    std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&temp, path)
+}
+
 // --- Not implemented yet ---------------------------------------------------------------------
 
 pub fn automatic_updates() -> io::Result<bool> {
@@ -446,14 +546,6 @@ pub fn auto_login() -> io::Result<Option<String>> {
 }
 
 pub fn set_auto_login(_enabled: bool) -> io::Result<()> {
-    Err(unsupported())
-}
-
-pub fn hibernate_enabled() -> io::Result<bool> {
-    Err(unsupported())
-}
-
-pub fn set_hibernate(_enabled: bool) -> io::Result<()> {
     Err(unsupported())
 }
 
@@ -520,6 +612,38 @@ mod tests {
         );
         assert_eq!(parse_kconfig_datetime("2026,13,1,0,0,0"), None);
         assert_eq!(parse_kconfig_datetime("soon"), None);
+    }
+
+    #[test]
+    fn the_last_allow_hibernation_wins() {
+        assert!(allows_hibernation(""));
+        assert!(allows_hibernation("[Sleep]\n#AllowHibernation=no\n"));
+        let config = "# /etc/systemd/sleep.conf\n[Sleep]\nAllowHibernation=no\n\
+                      # /etc/systemd/sleep.conf.d/x.conf\n[Sleep]\nAllowHibernation = yes\n";
+        assert!(allows_hibernation(config));
+        assert!(!allows_hibernation(&hibernate_drop_in(false)));
+        assert!(allows_hibernation(&hibernate_drop_in(true)));
+        // Other sections and invalid values are ignored.
+        assert!(allows_hibernation(
+            "[Other]\nAllowHibernation=no\n[Sleep]\nAllowHibernation=maybe\n"
+        ));
+    }
+
+    #[test]
+    fn hibernation_drop_in_is_written_and_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sleep.conf.d").join(HIBERNATE_DROP_IN);
+        set_hibernate_in(&dir.path().join("sleep.conf.d"), false, || unreachable!()).unwrap();
+        assert!(!allows_hibernation(
+            &std::fs::read_to_string(&path).unwrap()
+        ));
+
+        set_hibernate_in(&dir.path().join("sleep.conf.d"), true, || Ok(true)).unwrap();
+        assert!(!path.exists());
+
+        // Something else still forbids it: an explicit "yes" overrides.
+        set_hibernate_in(&dir.path().join("sleep.conf.d"), true, || Ok(false)).unwrap();
+        assert!(allows_hibernation(&std::fs::read_to_string(&path).unwrap()));
     }
 
     #[test]

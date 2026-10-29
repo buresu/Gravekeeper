@@ -162,10 +162,15 @@ impl SystemView {
                             );
                         },
                     );
+                    let hibernation_help = if cfg!(windows) {
+                        "When off, the computer cannot hibernate and hiberfil.sys is freed. Asks for administrator rights."
+                    } else {
+                        "When off, the computer cannot hibernate, including suspend-then-hibernate and hybrid sleep. Asks for administrator rights."
+                    };
                     form::row(
                         ui,
                         "Hibernation",
-                        Some("When off, the computer cannot hibernate and hiberfil.sys is freed. Asks for administrator rights."),
+                        Some(hibernation_help),
                         |ui| self.hibernate_control(ui, busy),
                     );
                 });
