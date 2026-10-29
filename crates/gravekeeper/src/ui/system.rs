@@ -171,10 +171,15 @@ impl SystemView {
                 });
 
                 form::section(ui, "Notifications", None, |ui| {
+                    let notifications_help = if cfg!(windows) {
+                        "When off, apps show no notifications for this user, including Windows tips and setup suggestions. Needs no administrator rights."
+                    } else {
+                        "When off, the desktop stays in Do not disturb: notifications are kept in its history but not shown. Needs no administrator rights."
+                    };
                     form::row(
                         ui,
                         "Notifications",
-                        Some("When off, apps show no notifications for this user, including Windows tips and setup suggestions. Needs no administrator rights."),
+                        Some(notifications_help),
                         |ui| {
                             let cached = &mut self.notifications;
                             direct_toggle(
@@ -187,12 +192,14 @@ impl SystemView {
                             );
                         },
                     );
-                    form::row(
-                        ui,
-                        "Windows Security notifications",
-                        Some("When off, Microsoft Defender / Windows Security shows no notifications. Asks for administrator rights."),
-                        |ui| self.security_notif_control(ui, busy),
-                    );
+                    if cfg!(windows) {
+                        form::row(
+                            ui,
+                            "Windows Security notifications",
+                            Some("When off, Microsoft Defender / Windows Security shows no notifications. Asks for administrator rights."),
+                            |ui| self.security_notif_control(ui, busy),
+                        );
+                    }
                 });
 
                 form::section(ui, "Firewall", None, |ui| {

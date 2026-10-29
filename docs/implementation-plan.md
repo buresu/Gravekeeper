@@ -140,7 +140,7 @@ Requested before Phase 4: native file dialogs and a less dated look.
   - [ ] Automatic updates on Linux and macOS
   - [x] Automatic login (Windows: Winlogon + LSA secret; password via the OS credential prompt, not the command line)
   - [ ] Automatic login on Linux (display-manager config) and macOS (`kcpassword`)
-  - [x] Notifications on/off (Windows; per-user toast switch + Windows tips, no elevation)
+  - [x] Notifications on/off (Windows; per-user toast switch + Windows tips, no elevation. Linux: Do not disturb on KDE and GNOME)
   - [x] Windows Security (Defender) notifications on/off (Windows; elevated)
   - [x] Firewall on/off (Windows; elevated, all profiles)
   - [x] Power: automatic sleep on/off (Windows; no elevation, per-user power scheme. Linux: KDE PowerDevil, GNOME gsettings)

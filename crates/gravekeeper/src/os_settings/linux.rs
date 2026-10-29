@@ -128,7 +128,7 @@ enum Store {
     /// A KConfig entry: file (under `~/.config`), group path and key.
     Kde {
         file: &'static str,
-        groups: [&'static str; 2],
+        groups: Vec<&'static str>,
         key: &'static str,
     },
     /// A GSettings key. Values are in GVariant text form, as `gsettings get` prints them.
@@ -147,17 +147,22 @@ impl Store {
         }
     }
 
+    /// The `kreadconfig6` / `kwriteconfig6` arguments naming a KConfig entry.
+    fn kde_args<'a>(file: &'a str, groups: &[&'a str], key: &'a str) -> Vec<&'a str> {
+        let mut args = vec!["--file", file];
+        for group in groups {
+            args.extend(["--group", group]);
+        }
+        args.extend(["--key", key]);
+        args
+    }
+
     /// `None` when the value is not set, so the desktop's default applies (KDE only;
     /// `gsettings` always reports the effective value).
     fn read(&self) -> io::Result<Option<String>> {
         match self {
             Store::Kde { file, groups, key } => {
-                let value = run(
-                    "kreadconfig6",
-                    &[
-                        "--file", file, "--group", groups[0], "--group", groups[1], "--key", key,
-                    ],
-                )?;
+                let value = run("kreadconfig6", &Self::kde_args(file, groups, key))?;
                 Ok((!value.is_empty()).then_some(value))
             }
             Store::Gnome { schema, key } => run("gsettings", &["get", schema, key]).map(Some),
@@ -168,9 +173,10 @@ impl Store {
     fn write(&self, value: Option<&str>) -> io::Result<()> {
         match self {
             Store::Kde { file, groups, key } => {
-                let mut args = vec![
-                    "--file", file, "--group", groups[0], "--group", groups[1], "--key", key,
-                ];
+                // `--notify` lets programs watching the file (KConfigWatcher) apply the change
+                // at once, as when the desktop's settings app saves it.
+                let mut args = Self::kde_args(file, groups, key);
+                args.push("--notify");
                 match value {
                     Some(value) => args.push(value),
                     None => args.push("--delete"),
@@ -261,7 +267,7 @@ fn kde_profiles(group: &'static str, key: &'static str, off: &'static str) -> Ve
         .map(|profile| Entry {
             store: Store::Kde {
                 file: POWERDEVIL_RC,
-                groups: [profile, group],
+                groups: vec![profile, group],
                 key,
             },
             off,
@@ -349,6 +355,82 @@ pub fn set_display_off(enabled: bool) -> io::Result<()> {
     set_power(desktop, &display_entries(desktop), enabled)
 }
 
+// --- Notifications ---------------------------------------------------------------------------
+//
+// Both desktops turn notifications off with their "Do not disturb" mode, which keeps them in
+// the history but shows no pop-ups and plays no sounds.
+//
+// KDE: Plasma has no plain switch; Do not disturb lasts until `[DoNotDisturb] Until` in
+// `plasmanotifyrc` (its "until manually disabled" is a year ahead). Turning notifications off
+// sets a date far enough ahead never to expire; turning them on removes it. Plasma watches the
+// file, so either applies at once.
+//
+// GNOME: `org.gnome.desktop.notifications show-banners`, the Do not disturb switch itself.
+
+/// Effectively forever, in the comma-separated form KConfig writes dates in.
+const DND_FOREVER: &str = "9999,12,31,0,0,0";
+
+fn dnd_until() -> Store {
+    Store::Kde {
+        file: "plasmanotifyrc",
+        groups: vec!["DoNotDisturb"],
+        key: "Until",
+    }
+}
+
+fn gnome_banners() -> Entry {
+    Entry {
+        store: Store::Gnome {
+            schema: "org.gnome.desktop.notifications",
+            key: "show-banners",
+        },
+        off: "false",
+        on_battery: false,
+    }
+}
+
+/// A KConfig date-time: `2026,8,25,9,2,57.196` (local time, as KConfig writes it), or ISO 8601.
+fn parse_kconfig_datetime(value: &str) -> Option<jiff::civil::DateTime> {
+    let parts: Vec<&str> = value.split(',').collect();
+    if parts.len() != 6 {
+        return value.parse().ok();
+    }
+    let number = |i: usize| parts[i].trim().parse::<i16>().ok();
+    let seconds: f64 = parts[5].trim().parse().ok()?;
+    jiff::civil::DateTime::new(
+        number(0)?,
+        number(1)?.try_into().ok()?,
+        number(2)?.try_into().ok()?,
+        number(3)?.try_into().ok()?,
+        number(4)?.try_into().ok()?,
+        seconds.trunc() as i8,
+        0,
+    )
+    .ok()
+}
+
+pub fn notifications_enabled() -> io::Result<bool> {
+    match desktop()? {
+        Desktop::Kde => {
+            let until = dnd_until().read()?;
+            // An unreadable date counts as no Do not disturb, like a past one.
+            let now = jiff::Zoned::now().datetime();
+            Ok(!until
+                .as_deref()
+                .and_then(parse_kconfig_datetime)
+                .is_some_and(|until| until > now))
+        }
+        Desktop::Gnome => entries_on(&[gnome_banners()]),
+    }
+}
+
+pub fn set_notifications(enabled: bool) -> io::Result<()> {
+    match desktop()? {
+        Desktop::Kde => dnd_until().write((!enabled).then_some(DND_FOREVER)),
+        Desktop::Gnome => set_entries(&[gnome_banners()], enabled),
+    }
+}
+
 // --- Not implemented yet ---------------------------------------------------------------------
 
 pub fn automatic_updates() -> io::Result<bool> {
@@ -372,14 +454,6 @@ pub fn hibernate_enabled() -> io::Result<bool> {
 }
 
 pub fn set_hibernate(_enabled: bool) -> io::Result<()> {
-    Err(unsupported())
-}
-
-pub fn notifications_enabled() -> io::Result<bool> {
-    Err(unsupported())
-}
-
-pub fn set_notifications(_enabled: bool) -> io::Result<()> {
     Err(unsupported())
 }
 
@@ -430,10 +504,29 @@ mod tests {
     }
 
     #[test]
+    fn kconfig_dates_are_parsed() {
+        let date = |s: &str| s.parse::<jiff::civil::DateTime>().unwrap();
+        assert_eq!(
+            parse_kconfig_datetime("2026,8,25,9,2,57.196"),
+            Some(date("2026-08-25T09:02:57"))
+        );
+        assert_eq!(
+            parse_kconfig_datetime(DND_FOREVER),
+            Some(date("9999-12-31T00:00:00"))
+        );
+        assert_eq!(
+            parse_kconfig_datetime("2026-10-30T12:00:00"),
+            Some(date("2026-10-30T12:00:00"))
+        );
+        assert_eq!(parse_kconfig_datetime("2026,13,1,0,0,0"), None);
+        assert_eq!(parse_kconfig_datetime("soon"), None);
+    }
+
+    #[test]
     fn store_ids_name_their_source() {
         let kde = Store::Kde {
             file: POWERDEVIL_RC,
-            groups: ["AC", "Display"],
+            groups: vec!["AC", "Display"],
             key: "TurnOffDisplayWhenIdle",
         };
         assert_eq!(
