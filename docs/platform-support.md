@@ -28,8 +28,8 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 | Administrator rights for OS settings | 🧪 pkexec | 🧪 same | ✅ UAC | 🧪 osascript |
 | Automatic updates on/off | ⏳ | ⏳ | ✅ Pro (services + policy); 🧪 Home (services only) | ⏳ |
 | Automatic logon on/off | ⏳ | ⏳ | 🧪 Winlogon + LSA secret (password via OS prompt) | ⏳ |
-| Automatic sleep on/off | ⏳ | ⏳ | 🧪 power scheme standby timeout (no elevation) | ⏳ |
-| Turn off display on/off | ⏳ | ⏳ | 🧪 power scheme video timeout (no elevation) | ⏳ |
+| Automatic sleep on/off | ✅ KDE Plasma 6 (PowerDevil); ⚠️ GNOME (gsettings, untested) | ✅ same | 🧪 power scheme standby timeout (no elevation) | ⏳ |
+| Turn off display on/off | ✅ KDE Plasma 6 (PowerDevil); ⚠️ GNOME (gsettings, untested) | ✅ same | 🧪 power scheme video timeout (no elevation) | ⏳ |
 | Hibernation on/off | ⏳ | ⏳ | 🧪 `powercfg /hibernate` (elevated) | ⏳ |
 | Notifications on/off | ⏳ | ⏳ | 🧪 per-user toast switch (no elevation) | ⏳ |
 | Windows Security notifications on/off | ⏳ | ⏳ | 🧪 Defender per-category (HKLM elevated + HKCU account protection) | ⏳ |
@@ -53,6 +53,8 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 - **Wayland**: windows cannot be hidden (a winit limitation). That is why Linux defaults to `Destroy`: closing destroys the window, and a new one is created when needed.
 - **Wayland window icon**: taken from the `.desktop` file matching the `app_id` (`gravekeeper`), installed by the `.deb` and by `packaging/linux/install.sh`. When run straight from a build directory or an un-integrated AppImage, the desktop environment shows its default icon.
 - **User services** run only while the user is logged in unless lingering is enabled (`loginctl enable-linger`).
+- **System settings** (the System page) that belong to the desktop are supported on KDE Plasma 6 and GNOME, detected from `XDG_CURRENT_DESKTOP`; on other desktops they show as unavailable. Values replaced by turning a setting off are saved in `os-settings-backup.json` in the data directory and restored when it is turned on again; with no saved value the desktop's default is restored.
+- **Automatic sleep** and **turning off the display**: on KDE, PowerDevil's "When inactive: sleep" action (`AutoSuspendAction`) and "Turn off screen" switch (`TurnOffDisplayWhenIdle`) in `~/.config/powerdevilrc`, for the AC, Battery and Low battery profiles, after which PowerDevil is told over D-Bus to reload; the timeouts are left as they are. On GNOME, `sleep-inactive-ac-type` / `sleep-inactive-battery-type` (set to `nothing`) and the screen-blank delay `org.gnome.desktop.session idle-delay` (set to 0). As on Windows, the battery profile is ignored when judging the state of a computer without a battery. No administrator rights are needed. Plasma 5 is not supported (it stores these differently).
 - **Build packages**: on Debian / Ubuntu, `libxkbcommon-dev libwayland-dev libfontconfig1-dev`. GTK and libappindicator are not needed.
 
 ### Windows
