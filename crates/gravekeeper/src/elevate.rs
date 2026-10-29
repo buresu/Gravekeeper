@@ -34,8 +34,9 @@ use crate::os_settings;
 pub enum Task {
     /// Turns automatic OS updates on (the OS default) or off.
     AutomaticUpdates { enabled: bool },
-    /// Turns automatic logon on or off. No password travels in the request: when enabling,
-    /// the elevated helper collects it through the OS credential prompt (see `os_settings`).
+    /// Turns automatic logon on or off. No password or account travels in the request: on
+    /// Windows the elevated helper collects them through the OS credential prompt; on Linux
+    /// it signs in pkexec's caller and needs no password (see `os_settings`).
     AutoLogin { enabled: bool },
     /// Enables or disables hibernation (system-wide; manages hiberfil.sys).
     Hibernate { enabled: bool },

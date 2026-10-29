@@ -121,10 +121,15 @@ impl SystemView {
                 });
 
                 form::section(ui, "Sign-in", None, |ui| {
+                    let auto_login_help = if cfg!(windows) {
+                        "Sign in to an account at startup without typing a password. You enter the password in a Windows prompt; it is stored by Windows, not by Gravekeeper."
+                    } else {
+                        "Sign in to your account at startup without typing a password. Asks for administrator rights. KWallet or the GNOME keyring is then not unlocked at sign-in."
+                    };
                     form::row(
                         ui,
                         "Automatic logon",
-                        Some("Sign in to an account at startup without typing a password. You enter the password in a Windows prompt; it is stored by Windows, not by Gravekeeper."),
+                        Some(auto_login_help),
                         |ui| self.auto_login_control(ui, busy),
                     );
                 });

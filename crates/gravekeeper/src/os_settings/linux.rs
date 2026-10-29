@@ -531,6 +531,305 @@ fn write_config_file(path: &Path, contents: &str) -> io::Result<()> {
     std::fs::rename(&temp, path)
 }
 
+// --- Automatic logon -------------------------------------------------------------------------
+//
+// Set in the display manager's configuration, by the elevated helper. The account is the one
+// that asked for the change: pkexec passes its uid to the helper as `PKEXEC_UID`, which the
+// caller cannot forge, and the request itself names no account. No password is involved;
+// the display manager's own PAM service starts the session.
+//
+// - Plasma Login Manager (an SDDM fork): `[Autologin] User` and `Session` in
+//   `/etc/plasmalogin.conf`, which its settings page also writes and which overrides the
+//   `.conf.d` drop-ins. Turning it off empties `User`, so a drop-in cannot turn it back on.
+// - GDM: `[daemon] AutomaticLoginEnable` and `AutomaticLogin` in `custom.conf` (`/etc/gdm` or,
+//   on Debian and Ubuntu, `/etc/gdm3`). GDM starts the user's default session.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisplayManager {
+    PlasmaLogin,
+    Gdm,
+}
+
+/// The display manager systemd starts, from the `display-manager.service` alias.
+fn display_manager() -> io::Result<DisplayManager> {
+    let unit = std::fs::read_link("/etc/systemd/system/display-manager.service").ok();
+    let name = unit
+        .as_deref()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    match name {
+        "plasmalogin.service" => Ok(DisplayManager::PlasmaLogin),
+        "gdm.service" | "gdm3.service" => Ok(DisplayManager::Gdm),
+        _ => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "needs Plasma Login Manager or GDM on Linux",
+        )),
+    }
+}
+
+const PLASMA_LOGIN_CONF: &str = "/etc/plasmalogin.conf";
+/// Read in this order, so later files override earlier ones; the main file comes last.
+const PLASMA_LOGIN_DROP_INS: [&str; 2] = [
+    "/usr/lib/plasmalogin/plasmalogin.conf.d",
+    "/etc/plasmalogin.conf.d",
+];
+
+fn gdm_conf() -> PathBuf {
+    if Path::new("/etc/gdm3").is_dir() {
+        PathBuf::from("/etc/gdm3/custom.conf")
+    } else {
+        PathBuf::from("/etc/gdm/custom.conf")
+    }
+}
+
+/// A configuration file's text, or empty when it does not exist.
+fn read_config(path: &Path) -> io::Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(io::Error::new(
+            err.kind(),
+            format!("{}: {err}", path.display()),
+        )),
+    }
+}
+
+/// The value of `key` in `[section]` of an INI-style file (KConfig, GKeyFile), the last one if
+/// it is set more than once.
+fn ini_get(text: &str, section: &str, key: &str) -> Option<String> {
+    let mut current = "";
+    let mut found = None;
+    for line in text.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            current = name;
+        } else if current == section
+            && !line.starts_with(['#', ';'])
+            && let Some((name, value)) = line.split_once('=')
+            && name.trim() == key
+        {
+            found = Some(value.trim().to_owned());
+        }
+    }
+    found
+}
+
+/// Sets `key` in `[section]` of an INI-style file, or removes it with `None`, keeping every
+/// other line (comments included) as it is. A missing section is added at the end.
+fn ini_set(text: &str, section: &str, key: &str, value: Option<&str>) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut done = value.is_none();
+    // Index in `out` just after the last non-blank line of the first matching section.
+    let mut insert_at = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(name) = trimmed.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            current = name.to_owned();
+        } else if current == section
+            && !trimmed.starts_with(['#', ';'])
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(name, _)| name.trim() == key)
+        {
+            // Replace the first assignment, drop any repeats.
+            if let Some(value) = value
+                && !std::mem::replace(&mut done, true)
+            {
+                out.push(format!("{key}={value}"));
+                insert_at = None;
+            }
+            continue;
+        }
+        out.push(line.to_owned());
+        if current == section && !trimmed.is_empty() && !done {
+            insert_at = Some(out.len());
+        }
+    }
+    if let Some(value) = value.filter(|_| !done) {
+        let line = format!("{key}={value}");
+        match insert_at {
+            Some(index) => out.insert(index, line),
+            None => {
+                if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                    out.push(String::new());
+                }
+                out.push(format!("[{section}]"));
+                out.push(line);
+            }
+        }
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
+}
+
+/// The `*.conf` files of a drop-in directory, in the order they are read.
+fn drop_in_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "conf"))
+        .collect();
+    files.sort();
+    files
+}
+
+fn plasma_login_value(key: &str) -> io::Result<Option<String>> {
+    let mut files: Vec<PathBuf> = PLASMA_LOGIN_DROP_INS
+        .iter()
+        .flat_map(|dir| drop_in_files(Path::new(dir)))
+        .collect();
+    files.push(PathBuf::from(PLASMA_LOGIN_CONF));
+    let mut value = None;
+    for file in files {
+        if let Some(found) = ini_get(&read_config(&file)?, "Autologin", key) {
+            value = Some(found);
+        }
+    }
+    Ok(value)
+}
+
+pub fn auto_login() -> io::Result<Option<String>> {
+    match display_manager()? {
+        DisplayManager::PlasmaLogin => {
+            Ok(plasma_login_value("User")?.filter(|user| !user.is_empty()))
+        }
+        DisplayManager::Gdm => {
+            let text = read_config(&gdm_conf())?;
+            let enabled = ini_get(&text, "daemon", "AutomaticLoginEnable")
+                .and_then(|value| parse_systemd_bool(&value))
+                .unwrap_or(false);
+            Ok(enabled
+                .then(|| ini_get(&text, "daemon", "AutomaticLogin"))
+                .flatten()
+                .filter(|user| !user.is_empty()))
+        }
+    }
+}
+
+/// The account that asked for the change: pkexec's caller, or this process's own user when
+/// Gravekeeper runs the task in-process.
+fn requesting_user() -> io::Result<String> {
+    let uid = match std::env::var("PKEXEC_UID") {
+        Ok(uid) => uid
+            .parse()
+            .map_err(|_| io::Error::other("PKEXEC_UID is not a number"))?,
+        // SAFETY: getuid has no preconditions and cannot fail.
+        Err(_) => unsafe { libc::getuid() },
+    };
+    if uid == 0 {
+        return Err(io::Error::other(
+            "automatic logon as root is not supported; run Gravekeeper as the user to sign in",
+        ));
+    }
+    user_name(uid)
+}
+
+fn user_name(uid: libc::uid_t) -> io::Result<String> {
+    use std::ffi::CStr;
+
+    let mut buffer = vec![0u8; 16 * 1024];
+    // SAFETY: an all-zero passwd is a valid out-parameter; getpwuid_r fills it.
+    let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result = std::ptr::null_mut();
+    // SAFETY: `passwd` and `buffer` outlive the call and the strings it points into `buffer`.
+    let code = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut passwd,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if code != 0 {
+        return Err(io::Error::from_raw_os_error(code));
+    }
+    if result.is_null() {
+        return Err(io::Error::other(format!("no account has uid {uid}")));
+    }
+    // SAFETY: on success `pw_name` is a NUL-terminated string inside `buffer`.
+    let name = unsafe { CStr::from_ptr(passwd.pw_name) };
+    let name = name.to_string_lossy().into_owned();
+    // Goes into a configuration file line, so anything that could break it is refused.
+    if name.is_empty() || name.chars().any(|c| c.is_control() || c == '[' || c == '=') {
+        return Err(io::Error::other(format!("unusable account name {name:?}")));
+    }
+    Ok(name)
+}
+
+/// The session to start: the one already configured, else Plasma, else the first installed.
+fn plasma_login_session() -> io::Result<String> {
+    if let Some(session) = plasma_login_value("Session")?.filter(|s| !s.is_empty()) {
+        return Ok(session);
+    }
+    let dirs = ["/usr/share/wayland-sessions", "/usr/share/xsessions"];
+    if Path::new(dirs[0]).join("plasma.desktop").is_file() {
+        return Ok("plasma.desktop".into());
+    }
+    dirs.iter()
+        .flat_map(|dir| {
+            let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "desktop"))
+                .collect();
+            files.sort();
+            files
+        })
+        .find_map(|path| path.file_name()?.to_str().map(str::to_owned))
+        .ok_or_else(|| io::Error::other("no desktop session is installed"))
+}
+
+/// Applies `edit` to a configuration file and writes it back atomically.
+fn edit_config(path: &Path, edit: impl FnOnce(String) -> String) -> io::Result<()> {
+    let text = read_config(path)?;
+    write_config_file(path, &edit(text))
+}
+
+pub fn set_auto_login(enabled: bool) -> io::Result<()> {
+    let manager = display_manager()?;
+    let user = if enabled {
+        Some(requesting_user()?)
+    } else {
+        None
+    };
+    match manager {
+        DisplayManager::PlasmaLogin => {
+            let session = match &user {
+                Some(_) => Some(plasma_login_session()?),
+                None => None,
+            };
+            edit_config(Path::new(PLASMA_LOGIN_CONF), |text| {
+                let text = ini_set(
+                    &text,
+                    "Autologin",
+                    "User",
+                    Some(user.as_deref().unwrap_or("")),
+                );
+                match &session {
+                    Some(session) => ini_set(&text, "Autologin", "Session", Some(session)),
+                    None => text,
+                }
+            })
+        }
+        DisplayManager::Gdm => edit_config(&gdm_conf(), |text| {
+            let text = ini_set(
+                &text,
+                "daemon",
+                "AutomaticLoginEnable",
+                Some(if user.is_some() { "True" } else { "False" }),
+            );
+            ini_set(&text, "daemon", "AutomaticLogin", user.as_deref())
+        }),
+    }
+}
+
 // --- Not implemented yet ---------------------------------------------------------------------
 
 pub fn automatic_updates() -> io::Result<bool> {
@@ -538,14 +837,6 @@ pub fn automatic_updates() -> io::Result<bool> {
 }
 
 pub fn set_automatic_updates(_enabled: bool) -> io::Result<()> {
-    Err(unsupported())
-}
-
-pub fn auto_login() -> io::Result<Option<String>> {
-    Ok(None)
-}
-
-pub fn set_auto_login(_enabled: bool) -> io::Result<()> {
     Err(unsupported())
 }
 
@@ -644,6 +935,69 @@ mod tests {
         // Something else still forbids it: an explicit "yes" overrides.
         set_hibernate_in(&dir.path().join("sleep.conf.d"), true, || Ok(false)).unwrap();
         assert!(allows_hibernation(&std::fs::read_to_string(&path).unwrap()));
+    }
+
+    #[test]
+    fn ini_values_are_read() {
+        let text = "[Autologin]\nUser=a\n# User=b\n[Other]\nUser=c\n[Autologin]\nUser = d\n";
+        assert_eq!(ini_get(text, "Autologin", "User").as_deref(), Some("d"));
+        assert_eq!(ini_get(text, "Autologin", "Session"), None);
+        assert_eq!(
+            ini_get("[Autologin]\nUser=\n", "Autologin", "User").as_deref(),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn ini_set_replaces_in_place() {
+        let text = "# comment\n[Autologin]\nRelogin=false\nUser=old\n\n[Theme]\nCurrent=breeze\n";
+        assert_eq!(
+            ini_set(text, "Autologin", "User", Some("new")),
+            "# comment\n[Autologin]\nRelogin=false\nUser=new\n\n[Theme]\nCurrent=breeze\n"
+        );
+        assert_eq!(
+            ini_set(text, "Autologin", "User", None),
+            "# comment\n[Autologin]\nRelogin=false\n\n[Theme]\nCurrent=breeze\n"
+        );
+    }
+
+    #[test]
+    fn ini_set_adds_missing_keys_and_sections() {
+        // Into the existing section, before the blank line that ends it.
+        assert_eq!(
+            ini_set(
+                "[daemon]\n# x\n\n[security]\n",
+                "daemon",
+                "AutomaticLogin",
+                Some("u")
+            ),
+            "[daemon]\n# x\nAutomaticLogin=u\n\n[security]\n"
+        );
+        assert_eq!(
+            ini_set("[Theme]\nCurrent=breeze\n", "Autologin", "User", Some("u")),
+            "[Theme]\nCurrent=breeze\n\n[Autologin]\nUser=u\n"
+        );
+        assert_eq!(
+            ini_set("", "Autologin", "User", Some("u")),
+            "[Autologin]\nUser=u\n"
+        );
+        // Removing what is not there changes nothing.
+        assert_eq!(ini_set("[A]\nB=c\n", "A", "D", None), "[A]\nB=c\n");
+    }
+
+    #[test]
+    fn ini_set_drops_repeated_keys() {
+        assert_eq!(
+            ini_set("[A]\nK=1\nK=2\n", "A", "K", Some("3")),
+            "[A]\nK=3\n"
+        );
+    }
+
+    #[test]
+    fn the_current_user_has_a_name() {
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        assert!(!user_name(uid).unwrap().is_empty());
     }
 
     #[test]
