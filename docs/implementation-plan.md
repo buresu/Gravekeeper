@@ -137,13 +137,14 @@ Requested before Phase 4: native file dialogs and a less dated look.
 - OS settings for unattended machines ([architecture.md](architecture.md#os-settings-and-administrator-rights)):
   - [x] Elevated helper (`gravekeeper elevated`): UAC, pkexec, osascript; closed set of tasks
   - [x] Automatic updates on/off (Windows: services, tasks, policy)
-  - [ ] Automatic updates on Linux and macOS
+  - [x] Automatic updates on Linux (elevated; apt and dnf-automatic timers)
+  - [ ] Automatic updates on macOS
   - [x] Automatic login (Windows: Winlogon + LSA secret; password via the OS credential prompt, not the command line)
   - [x] Automatic login on Linux (display-manager config: Plasma Login Manager, GDM)
   - [ ] Automatic login on macOS (`kcpassword`)
   - [x] Notifications on/off (Windows; per-user toast switch + Windows tips, no elevation. Linux: Do not disturb on KDE and GNOME)
   - [x] Windows Security (Defender) notifications on/off (Windows; elevated)
-  - [x] Firewall on/off (Windows; elevated, all profiles)
+  - [x] Firewall on/off (Windows; elevated, all profiles. Linux: ufw or firewalld, elevated)
   - [x] Power: automatic sleep on/off (Windows; no elevation, per-user power scheme. Linux: KDE PowerDevil, GNOME gsettings)
   - [x] Power: turn off the display on/off (Windows; no elevation. Linux: KDE PowerDevil, GNOME gsettings)
   - [x] Power: hibernation on/off (Windows; elevated, `powercfg /hibernate`. Linux: elevated, systemd `sleep.conf.d` drop-in)

@@ -6,6 +6,11 @@
 //! Values replaced when a setting is turned off are kept in a per-user backup file (see
 //! [`Backups`]) and put back when it is turned on again; with no backup the desktop's
 //! default is restored.
+//!
+//! Machine-wide settings (hibernation, automatic logon, the firewall, automatic updates) are
+//! changed by the elevated helper through systemd and the display manager's or firewall's own
+//! configuration; each is read without elevation. What they replace is recorded under `/etc`
+//! or `/var/lib/gravekeeper`, never in the user's backup file.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -830,15 +835,255 @@ pub fn set_auto_login(enabled: bool) -> io::Result<()> {
     }
 }
 
-// --- Not implemented yet ---------------------------------------------------------------------
+// --- Firewall --------------------------------------------------------------------------------
+//
+// ufw (Debian, Ubuntu) or firewalld (Fedora, openSUSE), whichever is installed; if both are,
+// the one that is on. Turning it on or off is machine-wide and runs in the elevated helper:
+// `ufw --force enable|disable` (`--force` skips its "may disrupt SSH" question), or
+// `systemctl enable|disable --now firewalld`. Turning ufw on also enables `ufw.service` where it
+// is disabled (Arch), or the firewall would not come back after a reboot. The state is read without elevation: ufw's
+// `ENABLED` in `/etc/ufw/ufw.conf`, which is what it applies at boot, and firewalld's unit.
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Firewall {
+    Ufw(PathBuf),
+    Firewalld,
+}
+
+const UFW_CONF: &str = "/etc/ufw/ufw.conf";
+
+fn ufw_binary() -> Option<PathBuf> {
+    ["/usr/sbin/ufw", "/usr/bin/ufw", "/sbin/ufw"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+}
+
+fn firewalld_installed() -> bool {
+    unit_states(&["firewalld.service"]).is_ok_and(|states| !states.is_empty())
+}
+
+fn firewall() -> io::Result<Firewall> {
+    let ufw = ufw_binary();
+    let firewalld = firewalld_installed();
+    match (ufw, firewalld) {
+        (Some(ufw), true) => Ok(if !ufw_enabled()? && firewalld_enabled()? {
+            Firewall::Firewalld
+        } else {
+            Firewall::Ufw(ufw)
+        }),
+        (Some(ufw), false) => Ok(Firewall::Ufw(ufw)),
+        (None, true) => Ok(Firewall::Firewalld),
+        (None, false) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "needs ufw or firewalld on Linux",
+        )),
+    }
+}
+
+/// `ENABLED=yes` in ufw.conf (a shell-style file, so the value may be quoted).
+fn ufw_conf_enabled(text: &str) -> bool {
+    text.lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("ENABLED="))
+        .next_back()
+        .is_some_and(|value| value.trim_matches(['"', '\'']).eq_ignore_ascii_case("yes"))
+}
+
+fn ufw_enabled() -> io::Result<bool> {
+    Ok(ufw_conf_enabled(&read_config(Path::new(UFW_CONF))?))
+}
+
+fn firewalld_enabled() -> io::Result<bool> {
+    let enabled = unit_states(&["firewalld.service"])?
+        .iter()
+        .any(|(_, state)| unit_state_enabled(state));
+    Ok(enabled || unit_active("firewalld.service"))
+}
+
+pub fn firewall_enabled() -> io::Result<bool> {
+    match firewall()? {
+        Firewall::Ufw(_) => ufw_enabled(),
+        Firewall::Firewalld => firewalld_enabled(),
+    }
+}
+
+pub fn set_firewall(enabled: bool) -> io::Result<()> {
+    match firewall()? {
+        Firewall::Ufw(ufw) => {
+            let ufw = ufw.to_string_lossy();
+            let args: &[&str] = if enabled {
+                &["--force", "enable"]
+            } else {
+                &["disable"]
+            };
+            run(&ufw, args)?;
+            // `ENABLED` is applied at boot by ufw.service, which Arch ships disabled. Turning
+            // it off needs no change: the service then finds `ENABLED=no` and does nothing.
+            if enabled
+                && unit_states(&["ufw.service"])?
+                    .iter()
+                    .any(|(_, state)| state == "disabled")
+            {
+                run("systemctl", &["enable", "ufw.service"])?;
+            }
+            Ok(())
+        }
+        Firewall::Firewalld => {
+            let action = if enabled { "enable" } else { "disable" };
+            run("systemctl", &[action, "--now", "firewalld.service"]).map(drop)
+        }
+    }
+}
+
+// --- systemd units ---------------------------------------------------------------------------
+
+/// The installed units among `units`, with their enablement state (`enabled`, `disabled`,
+/// …), as `systemctl list-unit-files` reports them. Needs no elevation.
+fn unit_states(units: &[&str]) -> io::Result<Vec<(String, String)>> {
+    let output = Command::new("systemctl")
+        .args(["list-unit-files", "--no-legend", "--no-pager"])
+        .args(units)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| io::Error::other(format!("cannot run systemctl: {err}")))?;
+    // It exits with 1 when none of the units is installed, which is an answer, not an error.
+    Ok(parse_unit_states(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_unit_states(output: &str) -> Vec<(String, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.to_owned(), fields.next()?.to_owned()))
+        })
+        .collect()
+}
+
+fn unit_state_enabled(state: &str) -> bool {
+    matches!(state, "enabled" | "enabled-runtime")
+}
+
+fn unit_active(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .stdin(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+// --- Automatic updates -----------------------------------------------------------------------
+//
+// Linux has no one switch: distributions that update on their own do it from systemd timers,
+// so those are what is turned off — apt's daily timers on Debian and Ubuntu (which also run
+// unattended-upgrades), dnf-automatic's on Fedora and RHEL. A distribution with none of them
+// installed (Arch, for instance) does not update on its own and reports the setting as
+// unsupported. Software centres' own per-user update settings are not touched.
+//
+// Turning updates off disables and stops the timers that were enabled, after recording them in
+// `/var/lib/gravekeeper/disabled-update-units` (machine-wide, so readable whichever account the
+// helper runs as); turning them on re-enables exactly those. With no record the distribution's
+// usual timers are enabled. Units are never masked or edited, so the change is plain
+// `systemctl enable|disable`.
+
+const UPDATE_TIMERS: &[&str] = &[
+    "apt-daily.timer",
+    "apt-daily-upgrade.timer",
+    "dnf-automatic.timer",
+    "dnf-automatic-download.timer",
+    "dnf-automatic-install.timer",
+    "dnf-automatic-notifyonly.timer",
+    "dnf5-automatic.timer",
+];
+/// Enabled when turning updates on with no record of what was turned off: Debian's defaults,
+/// and the main timer of whichever dnf-automatic is installed.
+const DEFAULT_UPDATE_TIMERS: &[&str] = &[
+    "apt-daily.timer",
+    "apt-daily-upgrade.timer",
+    "dnf5-automatic.timer",
+    "dnf-automatic.timer",
+];
+const UPDATE_RECORD: &str = "/var/lib/gravekeeper/disabled-update-units";
+
+fn installed_update_timers() -> io::Result<Vec<(String, String)>> {
+    let installed = unit_states(UPDATE_TIMERS)?;
+    if installed.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this distribution has no automatic update timers (apt-daily, dnf-automatic)",
+        ));
+    }
+    Ok(installed)
+}
 
 pub fn automatic_updates() -> io::Result<bool> {
-    Err(unsupported())
+    Ok(installed_update_timers()?
+        .iter()
+        .any(|(_, state)| unit_state_enabled(state)))
 }
 
-pub fn set_automatic_updates(_enabled: bool) -> io::Result<()> {
-    Err(unsupported())
+pub fn set_automatic_updates(enabled: bool) -> io::Result<()> {
+    let installed = installed_update_timers()?;
+    let record = Path::new(UPDATE_RECORD);
+    let recorded = read_config(record)?;
+    let mut recorded: Vec<&str> = recorded
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if enabled {
+        let is_installed = |unit: &&str| installed.iter().any(|(name, _)| name == unit);
+        recorded.retain(is_installed);
+        let units: Vec<&str> = if recorded.is_empty() {
+            let mut defaults: Vec<&str> = DEFAULT_UPDATE_TIMERS
+                .iter()
+                .copied()
+                .filter(is_installed)
+                .collect();
+            // Only one dnf-automatic: dnf5's if both are listed.
+            if defaults.contains(&"dnf5-automatic.timer") {
+                defaults.retain(|unit| *unit != "dnf-automatic.timer");
+            }
+            defaults
+        } else {
+            recorded
+        };
+        if !units.is_empty() {
+            run(
+                "systemctl",
+                &[&["enable", "--now"], units.as_slice()].concat(),
+            )?;
+        }
+        match std::fs::remove_file(record) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    } else {
+        let units: Vec<&str> = installed
+            .iter()
+            .filter(|(_, state)| unit_state_enabled(state))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        for unit in &units {
+            if !recorded.contains(unit) {
+                recorded.push(unit);
+            }
+        }
+        // Recorded first, so a failure never leaves timers disabled with nothing to restore.
+        write_config_file(record, &(recorded.join("\n") + "\n"))?;
+        if !units.is_empty() {
+            run(
+                "systemctl",
+                &[&["disable", "--now"], units.as_slice()].concat(),
+            )?;
+        }
+        Ok(())
+    }
 }
+
+// --- Windows only ---------------------------------------------------------------------
 
 pub fn security_notifications_enabled() -> io::Result<bool> {
     Err(unsupported())
@@ -849,14 +1094,6 @@ pub fn set_security_notifications(_enabled: bool) -> io::Result<()> {
 }
 
 pub fn set_security_notifications_user(_enabled: bool) -> io::Result<()> {
-    Err(unsupported())
-}
-
-pub fn firewall_enabled() -> io::Result<bool> {
-    Err(unsupported())
-}
-
-pub fn set_firewall(_enabled: bool) -> io::Result<()> {
     Err(unsupported())
 }
 
@@ -998,6 +1235,29 @@ mod tests {
         // SAFETY: getuid has no preconditions.
         let uid = unsafe { libc::getuid() };
         assert!(!user_name(uid).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ufw_conf_is_read() {
+        assert!(ufw_conf_enabled("# comment\nENABLED=yes\nLOGLEVEL=low\n"));
+        assert!(ufw_conf_enabled("ENABLED=\"yes\"\n"));
+        assert!(!ufw_conf_enabled("ENABLED=no\n"));
+        assert!(!ufw_conf_enabled("ENABLED=yes\nENABLED=no\n"));
+        assert!(!ufw_conf_enabled(""));
+    }
+
+    #[test]
+    fn unit_states_are_parsed() {
+        let output = "apt-daily.timer         enabled  enabled\n\
+                      apt-daily-upgrade.timer disabled enabled\n";
+        assert_eq!(
+            parse_unit_states(output),
+            [
+                ("apt-daily.timer".into(), "enabled".into()),
+                ("apt-daily-upgrade.timer".into(), "disabled".into())
+            ]
+        );
+        assert!(parse_unit_states("").is_empty());
     }
 
     #[test]

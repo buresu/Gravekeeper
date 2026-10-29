@@ -213,10 +213,21 @@ impl SystemView {
                 });
 
                 form::section(ui, "Firewall", None, |ui| {
+                    let (firewall_label, firewall_help) = if cfg!(windows) {
+                        (
+                            "Microsoft Defender Firewall",
+                            "Turns the firewall on or off for all network profiles. Off leaves the computer unprotected; asks for administrator rights.",
+                        )
+                    } else {
+                        (
+                            "Firewall",
+                            "Turns ufw or firewalld on or off. Off leaves the computer unprotected; asks for administrator rights.",
+                        )
+                    };
                     form::row(
                         ui,
-                        "Microsoft Defender Firewall",
-                        Some("Turns the firewall on or off for all network profiles. Off leaves the computer unprotected; asks for administrator rights."),
+                        firewall_label,
+                        Some(firewall_help),
                         |ui| self.firewall_control(ui, busy),
                     );
                 });
