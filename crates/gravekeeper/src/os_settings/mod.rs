@@ -49,12 +49,13 @@ pub fn set_display_off(enabled: bool) -> io::Result<()> {
     imp::set_display_off(enabled)
 }
 
-/// Whether hard disks turn off on their own after a period of inactivity. Only on Windows.
+/// Whether hard disks turn off on their own after a period of inactivity. Windows and macOS.
 pub fn disk_off() -> io::Result<bool> {
     imp::disk_off()
 }
 
-/// Turns the disk-off timeout on or off. Needs no administrator rights.
+/// Turns the disk-off timeout on or off. Like [`set_automatic_sleep`], in-process except on
+/// macOS.
 pub fn set_disk_off(enabled: bool) -> io::Result<()> {
     imp::set_disk_off(enabled)
 }
@@ -108,14 +109,49 @@ pub(crate) fn set_firewall(enabled: bool) -> io::Result<()> {
     imp::set_firewall(enabled)
 }
 
-/// Whether macOS's App Nap may slow down apps that are not visible (its default).
-pub fn app_nap_enabled() -> io::Result<bool> {
-    imp::app_nap_enabled()
+/// Declares settings that exist only on macOS; elsewhere they report `Unsupported`.
+macro_rules! macos_only {
+    ($($(#[$attr:meta])* $vis:vis fn $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {$(
+        $(#[$attr])*
+        $vis fn $name($($arg: $ty),*) -> io::Result<$ret> {
+            #[cfg(target_os = "macos")]
+            return imp::$name($($arg),*);
+            #[cfg(not(target_os = "macos"))]
+            {
+                $(let _: $ty = $arg;)*
+                Err(io::Error::new(io::ErrorKind::Unsupported, "only on macOS"))
+            }
+        }
+    )*};
 }
 
-/// Turns App Nap on or off for the current user's apps. Needs no administrator rights.
-pub fn set_app_nap(enabled: bool) -> io::Result<()> {
-    imp::set_app_nap(enabled)
+macos_only! {
+    /// Whether App Nap may slow down apps that are not visible (its default).
+    pub fn app_nap_enabled() -> bool;
+    /// Turns App Nap on or off for the current user's apps. Needs no administrator rights.
+    pub fn set_app_nap(enabled: bool) -> ();
+    /// Whether the screen saver starts after a period of inactivity.
+    pub fn screen_saver_enabled() -> bool;
+    /// Turns the screen saver on or off for the current user. Needs no administrator rights.
+    pub fn set_screen_saver(enabled: bool) -> ();
+    /// Whether apps that were open at logout or restart are opened again at login.
+    pub fn reopen_apps_enabled() -> bool;
+    /// Turns reopening apps at login on or off for the current user. Needs no administrator
+    /// rights.
+    pub fn set_reopen_apps(enabled: bool) -> ();
+    /// Whether the computer starts up on its own after a power failure.
+    pub fn restart_after_power_failure() -> bool;
+    /// Needs administrator rights (goes through `elevate`).
+    pub(crate) fn set_restart_after_power_failure(enabled: bool) -> ();
+    /// Whether network access (Wake on LAN) wakes the computer from sleep.
+    pub fn wake_for_network() -> bool;
+    /// Needs administrator rights (goes through `elevate`).
+    pub(crate) fn set_wake_for_network(enabled: bool) -> ();
+    /// Whether the Bluetooth Setup Assistant opens at startup when no keyboard or mouse is
+    /// found.
+    pub fn bluetooth_setup_assistant() -> bool;
+    /// Needs administrator rights (goes through `elevate`).
+    pub(crate) fn set_bluetooth_setup_assistant(enabled: bool) -> ();
 }
 
 /// Needs administrator rights. When enabling, the elevated helper collects the password

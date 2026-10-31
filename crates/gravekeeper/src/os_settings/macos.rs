@@ -2,14 +2,14 @@
 //! preference files, `pmset` for power management, `socketfilterfw` for the application
 //! firewall. Everything is read without elevation.
 //!
-//! Unlike Windows and Linux, the power settings (sleep, display off, hibernation) are
+//! Unlike Windows and Linux, the power settings (sleep, display and disk off, hibernation) are
 //! machine-wide on macOS — System Settings asks for an administrator to change them — so they
-//! go through the elevated helper too (see [`super::POWER_NEEDS_ADMIN`]). App Nap is the only
-//! per-user setting and is changed in-process.
+//! go through the elevated helper too (see [`super::POWER_NEEDS_ADMIN`]). The per-user ones
+//! (App Nap, the screen saver, reopening apps at login) are changed in-process.
 //!
-//! Values replaced when a setting is turned off are recorded machine-wide in
-//! [`RECORD`], written by the elevated helper, and put back when it is turned on again; with
-//! no record the macOS default is restored.
+//! Values replaced when a setting is turned off are recorded and put back when it is turned
+//! on again; with no record the macOS default is restored. Machine-wide values are recorded in
+//! [`RECORD`] by the elevated helper, per-user ones in the user's data directory.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -66,6 +66,12 @@ impl Record {
         Self::load_from(PathBuf::from(RECORD))
     }
 
+    /// For per-user values, which must not go in the machine-wide record.
+    fn load_user() -> io::Result<Self> {
+        let paths = gravekeeper_core::paths::Paths::from_env()?;
+        Self::load_from(paths.data_dir.join("os-settings-backup.json"))
+    }
+
     fn load_from(path: PathBuf) -> io::Result<Self> {
         let values = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|err| {
@@ -118,32 +124,92 @@ fn remove_file(path: &Path) -> io::Result<()> {
 
 // --- Preferences (`defaults`) ----------------------------------------------------------------
 
-/// A key's value as `defaults read` prints it (booleans as `1` / `0`), or `None` when it is
-/// not set.
-fn defaults_read(domain: &str, key: &str) -> io::Result<Option<String>> {
-    let output = spawn("defaults", &["read", domain, key])?;
-    if output.status.success() {
-        return Ok(Some(
-            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
-        ));
-    }
-    // "The domain/default pair of (…, …) does not exist", or "Could not find key".
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("does not exist") || stderr.contains("Could not find") {
-        return Ok(None);
-    }
-    Err(failure("defaults", &output))
+/// One preference key, as `defaults` names it: a file path for machine-wide preferences under
+/// `/Library/Preferences`, or a domain for the user's own.
+#[derive(Debug, Clone, Copy)]
+struct Pref {
+    domain: &'static str,
+    key: &'static str,
+    /// The `defaults write` type: `-bool`, `-int` or `-string`.
+    kind: &'static str,
+    /// Kept per computer, in `~/Library/Preferences/ByHost` (the screen saver's settings).
+    current_host: bool,
 }
 
-fn defaults_write(domain: &str, key: &str, kind: &str, value: &str) -> io::Result<()> {
-    run("defaults", &["write", domain, key, kind, value]).map(drop)
-}
+impl Pref {
+    const fn new(domain: &'static str, key: &'static str, kind: &'static str) -> Self {
+        Pref {
+            domain,
+            key,
+            kind,
+            current_host: false,
+        }
+    }
 
-/// Removes a key, so the default applies. A key that is not set is not an error.
-fn defaults_delete(domain: &str, key: &str) -> io::Result<()> {
-    match defaults_read(domain, key)? {
-        Some(_) => run("defaults", &["delete", domain, key]).map(drop),
-        None => Ok(()),
+    const fn current_host(self) -> Self {
+        Pref {
+            current_host: true,
+            ..self
+        }
+    }
+
+    /// The record key.
+    fn id(&self) -> String {
+        let host = if self.current_host {
+            "currentHost:"
+        } else {
+            ""
+        };
+        format!("defaults:{host}{}/{}", self.domain, self.key)
+    }
+
+    fn args<'a>(&'a self, verb: &'a str) -> Vec<&'a str> {
+        let mut args = Vec::with_capacity(6);
+        if self.current_host {
+            args.push("-currentHost");
+        }
+        args.extend([verb, self.domain, self.key]);
+        args
+    }
+
+    /// The value as `defaults read` prints it (booleans as `1` / `0`), or `None` when it is
+    /// not set.
+    fn read(&self) -> io::Result<Option<String>> {
+        let output = spawn("defaults", &self.args("read"))?;
+        if output.status.success() {
+            return Ok(Some(
+                String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+            ));
+        }
+        // "The domain/default pair of (…, …) does not exist", or "Could not find key".
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("does not exist")
+            || stderr.contains("Could not find")
+            || stderr.contains("not found")
+        {
+            return Ok(None);
+        }
+        Err(failure("defaults", &output))
+    }
+
+    /// Booleans are given as `1` / `0`, the way [`Pref::read`] returns them.
+    fn write(&self, value: &str) -> io::Result<()> {
+        let value = match self.kind {
+            "-bool" if value == "0" => "false",
+            "-bool" => "true",
+            _ => value,
+        };
+        let mut args = self.args("write");
+        args.extend([self.kind, value]);
+        run("defaults", &args).map(drop)
+    }
+
+    /// Removes the key, so the default applies. A key that is not set is not an error.
+    fn delete(&self) -> io::Result<()> {
+        match self.read()? {
+            Some(_) => run("defaults", &self.args("delete")).map(drop),
+            None => Ok(()),
+        }
     }
 }
 
@@ -223,32 +289,26 @@ fn power_settings() -> io::Result<BTreeMap<Source, BTreeMap<String, String>>> {
 
 /// Where macOS keeps one value.
 enum Store {
-    /// A boolean in a preferences file (`1` / `0`, as `defaults read` prints them).
-    Pref {
-        domain: &'static str,
+    Pref(Pref),
+    /// A `pmset` setting of one power source.
+    Pmset {
+        source: Source,
         key: &'static str,
     },
-    /// A `pmset` setting of one power source.
-    Pmset { source: Source, key: &'static str },
 }
 
 impl Store {
     /// The record key.
     fn id(&self) -> String {
         match self {
-            Store::Pref { domain, key } => format!("defaults:{domain}/{key}"),
+            Store::Pref(pref) => pref.id(),
             Store::Pmset { source, key } => format!("pmset:{}/{key}", source.name()),
         }
     }
 
     fn write(&self, value: &str) -> io::Result<()> {
         match self {
-            Store::Pref { domain, key } => defaults_write(
-                domain,
-                key,
-                "-bool",
-                if value == "0" { "false" } else { "true" },
-            ),
+            Store::Pref(pref) => pref.write(value),
             Store::Pmset { source, key } => run("pmset", &[source.flag(), key, value]).map(drop),
         }
     }
@@ -267,15 +327,10 @@ struct Entry {
 }
 
 impl Entry {
-    fn pref(
-        domain: &'static str,
-        key: &'static str,
-        off: &'static str,
-        default: &'static str,
-    ) -> io::Result<Self> {
+    fn pref(pref: Pref, off: &'static str, default: &'static str) -> io::Result<Self> {
         Ok(Entry {
-            current: defaults_read(domain, key)?,
-            store: Store::Pref { domain, key },
+            current: pref.read()?,
+            store: Store::Pref(pref),
             off,
             default,
         })
@@ -290,13 +345,14 @@ impl Entry {
     fn restore(&self, saved: Option<&str>) -> io::Result<()> {
         match (&self.store, saved) {
             (_, Some(value)) => self.store.write(value),
-            (Store::Pref { domain, key }, None) => defaults_delete(domain, key),
+            (Store::Pref(pref), None) => pref.delete(),
             (Store::Pmset { .. }, None) => self.store.write(self.default),
         }
     }
 }
 
-/// `key` of every power source this Mac has, with the default for each.
+/// `key` of every power source this Mac has, with the default for each. Empty when the Mac
+/// does not have the setting.
 fn pmset_entries(
     key: &'static str,
     off: &'static str,
@@ -320,8 +376,14 @@ fn entries_on(entries: &[Entry]) -> bool {
     entries.iter().any(|entry| !entry.is_off())
 }
 
+/// For machine-wide values, in the elevated helper.
 fn set_entries(entries: &[Entry], enabled: bool) -> io::Result<()> {
     set_entries_in(&mut Record::load()?, entries, enabled)
+}
+
+/// For per-user values, in Gravekeeper's own process.
+fn set_user_entries(entries: &[Entry], enabled: bool) -> io::Result<()> {
+    set_entries_in(&mut Record::load_user()?, entries, enabled)
 }
 
 fn set_entries_in(record: &mut Record, entries: &[Entry], enabled: bool) -> io::Result<()> {
@@ -352,12 +414,13 @@ fn set_entries_in(record: &mut Record, entries: &[Entry], enabled: bool) -> io::
     }
 }
 
-// --- Power (sleep, display off) --------------------------------------------------------------
+// --- Power (sleep, display and disk off) -----------------------------------------------------
 //
-// `sleep` and `displaysleep` of each power source, in minutes; 0 = never, which is what
-// System Settings' "Prevent automatic sleeping when the display is off" sets. With nothing
-// recorded, turning one on sets a real wait, as on Windows: 30 / 15 minutes of system sleep
-// (AC / battery), and the macOS defaults of 10 / 2 minutes for the display.
+// `sleep`, `displaysleep` and `disksleep` of each power source, in minutes; 0 = never, which
+// is what System Settings' "Prevent automatic sleeping when the display is off" sets. With
+// nothing recorded, turning one on sets a real wait, as on Windows: 30 / 15 minutes of system
+// sleep (AC / battery), and the macOS defaults of 10 / 2 minutes for the display and 10 for
+// disks. Only hard disk drives (such as external ones) spin down; SSDs are not affected.
 
 fn sleep_entries() -> io::Result<Vec<Entry>> {
     pmset_entries("sleep", "0", |source| match source {
@@ -387,6 +450,63 @@ pub fn display_off() -> io::Result<bool> {
 
 pub fn set_display_off(enabled: bool) -> io::Result<()> {
     set_entries(&display_entries()?, enabled)
+}
+
+fn disk_entries() -> io::Result<Vec<Entry>> {
+    let entries = pmset_entries("disksleep", "0", |_| "10")?;
+    if entries.is_empty() {
+        return Err(unsupported("this Mac has no disk sleep setting"));
+    }
+    Ok(entries)
+}
+
+pub fn disk_off() -> io::Result<bool> {
+    Ok(entries_on(&disk_entries()?))
+}
+
+pub fn set_disk_off(enabled: bool) -> io::Result<()> {
+    set_entries(&disk_entries()?, enabled)
+}
+
+// --- Restart after a power failure, wake for network access ----------------------------------
+//
+// `autorestart` and `womp` (Wake on LAN, "Wake for network access") of each power source, 1 =
+// on. Both are machine-wide and run in the elevated helper. Laptops have no `autorestart`, and
+// the setting is then unavailable.
+
+fn switch_entries(key: &'static str, missing: &str) -> io::Result<Vec<Entry>> {
+    let entries = pmset_entries(key, "0", |_| "1")?;
+    if entries.is_empty() {
+        return Err(unsupported(missing));
+    }
+    Ok(entries)
+}
+
+fn restart_entries() -> io::Result<Vec<Entry>> {
+    switch_entries(
+        "autorestart",
+        "this Mac cannot start up after a power failure",
+    )
+}
+
+fn wake_entries() -> io::Result<Vec<Entry>> {
+    switch_entries("womp", "this Mac cannot wake for network access")
+}
+
+pub fn restart_after_power_failure() -> io::Result<bool> {
+    Ok(entries_on(&restart_entries()?))
+}
+
+pub fn set_restart_after_power_failure(enabled: bool) -> io::Result<()> {
+    set_entries(&restart_entries()?, enabled)
+}
+
+pub fn wake_for_network() -> io::Result<bool> {
+    Ok(entries_on(&wake_entries()?))
+}
+
+pub fn set_wake_for_network(enabled: bool) -> io::Result<()> {
+    set_entries(&wake_entries()?, enabled)
 }
 
 // --- Hibernation -----------------------------------------------------------------------------
@@ -439,7 +559,7 @@ const UPDATE_KEYS: [(&str, &str); 5] = [
 fn update_entries() -> io::Result<Vec<Entry>> {
     UPDATE_KEYS
         .into_iter()
-        .map(|(key, default)| Entry::pref(SOFTWARE_UPDATE, key, "0", default))
+        .map(|(key, default)| Entry::pref(Pref::new(SOFTWARE_UPDATE, key, "-bool"), "0", default))
         .collect()
 }
 
@@ -461,7 +581,11 @@ pub fn set_automatic_updates(enabled: bool) -> io::Result<()> {
 // checks it through PAM before saving, so a typo does not leave the Mac at the login window.
 // macOS does not sign in automatically while FileVault is on.
 
-const LOGINWINDOW: &str = "/Library/Preferences/com.apple.loginwindow";
+const AUTO_LOGIN_USER: Pref = Pref::new(
+    "/Library/Preferences/com.apple.loginwindow",
+    "autoLoginUser",
+    "-string",
+);
 const KCPASSWORD: &str = "/etc/kcpassword";
 
 fn filevault_on() -> io::Result<bool> {
@@ -485,12 +609,12 @@ fn no_filevault() -> io::Result<()> {
 
 pub fn auto_login() -> io::Result<Option<String>> {
     no_filevault()?;
-    Ok(defaults_read(LOGINWINDOW, "autoLoginUser")?.filter(|user| !user.is_empty()))
+    Ok(AUTO_LOGIN_USER.read()?.filter(|user| !user.is_empty()))
 }
 
 pub fn set_auto_login(enabled: bool) -> io::Result<()> {
     if !enabled {
-        defaults_delete(LOGINWINDOW, "autoLoginUser")?;
+        AUTO_LOGIN_USER.delete()?;
         return remove_file(Path::new(KCPASSWORD));
     }
     no_filevault()?;
@@ -506,7 +630,7 @@ pub fn set_auto_login(enabled: bool) -> io::Result<()> {
         &kcpassword(password.as_bytes()),
         0o600,
     )?;
-    defaults_write(LOGINWINDOW, "autoLoginUser", "-string", &user)
+    AUTO_LOGIN_USER.write(&user)
 }
 
 /// The account signed in at the screen.
@@ -707,8 +831,7 @@ pub fn set_firewall(enabled: bool) -> io::Result<()> {
 // read it at launch, so it applies to apps started afterwards. No administrator rights are
 // needed. On is the default, so turning it on removes the key.
 
-const GLOBAL_DOMAIN: &str = "NSGlobalDomain";
-const APP_SLEEP_DISABLED: &str = "NSAppSleepDisabled";
+const APP_SLEEP_DISABLED: Pref = Pref::new("NSGlobalDomain", "NSAppSleepDisabled", "-bool");
 
 /// `defaults` prints a boolean as `1` / `0`, but a value written as a string or by hand may
 /// read `YES` or `true`.
@@ -717,17 +840,90 @@ fn parse_defaults_bool(value: &str) -> bool {
 }
 
 pub fn app_nap_enabled() -> io::Result<bool> {
-    Ok(!defaults_read(GLOBAL_DOMAIN, APP_SLEEP_DISABLED)?
+    Ok(!APP_SLEEP_DISABLED
+        .read()?
         .as_deref()
         .is_some_and(parse_defaults_bool))
 }
 
 pub fn set_app_nap(enabled: bool) -> io::Result<()> {
     if enabled {
-        defaults_delete(GLOBAL_DOMAIN, APP_SLEEP_DISABLED)
+        APP_SLEEP_DISABLED.delete()
     } else {
-        defaults_write(GLOBAL_DOMAIN, APP_SLEEP_DISABLED, "-bool", "true")
+        APP_SLEEP_DISABLED.write("1")
     }
+}
+
+// --- Screen saver ----------------------------------------------------------------------------
+//
+// `idleTime` (seconds, 0 = never) in the user's per-computer `com.apple.screensaver`, which
+// System Settings > Lock Screen > "Start Screen Saver when inactive" sets. Per-user, so
+// changed in-process. Unset means the macOS default, which counts as on.
+
+const SCREEN_SAVER_IDLE: Pref =
+    Pref::new("com.apple.screensaver", "idleTime", "-int").current_host();
+
+fn screen_saver_entries() -> io::Result<Vec<Entry>> {
+    Ok(vec![Entry::pref(SCREEN_SAVER_IDLE, "0", "1200")?])
+}
+
+pub fn screen_saver_enabled() -> io::Result<bool> {
+    Ok(entries_on(&screen_saver_entries()?))
+}
+
+pub fn set_screen_saver(enabled: bool) -> io::Result<()> {
+    set_user_entries(&screen_saver_entries()?, enabled)
+}
+
+// --- Reopening apps at login -----------------------------------------------------------------
+//
+// The user's `com.apple.loginwindow`: `TALLogoutSavesState` is the "Reopen windows when
+// logging back in" checkbox of the restart and shut-down dialogs (macOS remembers its last
+// state there), and `LoginwindowLaunchesRelaunchApps` whether apps saved at logout are opened.
+// Gravekeeper starts supervised apps itself, so macOS reopening them as well would start them
+// twice. Per-user, so changed in-process.
+
+fn reopen_entries() -> io::Result<Vec<Entry>> {
+    ["TALLogoutSavesState", "LoginwindowLaunchesRelaunchApps"]
+        .into_iter()
+        .map(|key| Entry::pref(Pref::new("com.apple.loginwindow", key, "-bool"), "0", "1"))
+        .collect()
+}
+
+/// Either key being off is enough: nothing is saved, or nothing saved is opened.
+pub fn reopen_apps_enabled() -> io::Result<bool> {
+    Ok(!reopen_entries()?.iter().any(Entry::is_off))
+}
+
+pub fn set_reopen_apps(enabled: bool) -> io::Result<()> {
+    set_user_entries(&reopen_entries()?, enabled)
+}
+
+// --- Bluetooth Setup Assistant ---------------------------------------------------------------
+//
+// `BluetoothAutoSeekKeyboard` and `BluetoothAutoSeekPointingDevice` in
+// `/Library/Preferences/com.apple.Bluetooth`: whether the Bluetooth Setup Assistant opens at
+// startup when no keyboard or mouse is found, which would cover the screen of a Mac running
+// without them. Machine-wide; applies at the next startup.
+
+const BLUETOOTH: &str = "/Library/Preferences/com.apple.Bluetooth";
+
+fn bluetooth_entries() -> io::Result<Vec<Entry>> {
+    [
+        "BluetoothAutoSeekKeyboard",
+        "BluetoothAutoSeekPointingDevice",
+    ]
+    .into_iter()
+    .map(|key| Entry::pref(Pref::new(BLUETOOTH, key, "-int"), "0", "1"))
+    .collect()
+}
+
+pub fn bluetooth_setup_assistant() -> io::Result<bool> {
+    Ok(entries_on(&bluetooth_entries()?))
+}
+
+pub fn set_bluetooth_setup_assistant(enabled: bool) -> io::Result<()> {
+    set_entries(&bluetooth_entries()?, enabled)
 }
 
 // --- Not available on macOS ------------------------------------------------------------------
@@ -744,14 +940,6 @@ pub fn set_notifications(_enabled: bool) -> io::Result<()> {
     Err(unsupported(
         "macOS lets apps neither read nor switch Focus (Do Not Disturb)",
     ))
-}
-
-pub fn disk_off() -> io::Result<bool> {
-    Err(unsupported("only on Windows"))
-}
-
-pub fn set_disk_off(_enabled: bool) -> io::Result<()> {
-    Err(unsupported("only on Windows"))
 }
 
 pub fn security_notifications_enabled() -> io::Result<bool> {
@@ -844,14 +1032,31 @@ mod tests {
 
     fn pref(key: &'static str, current: Option<&str>, default: &'static str) -> Entry {
         Entry {
-            store: Store::Pref {
-                domain: "test",
-                key,
-            },
+            store: Store::Pref(Pref::new("test", key, "-bool")),
             current: current.map(str::to_owned),
             off: "0",
             default,
         }
+    }
+
+    #[test]
+    fn per_computer_preferences_use_current_host() {
+        assert_eq!(
+            SCREEN_SAVER_IDLE.args("read"),
+            ["-currentHost", "read", "com.apple.screensaver", "idleTime"]
+        );
+        assert_eq!(
+            SCREEN_SAVER_IDLE.id(),
+            "defaults:currentHost:com.apple.screensaver/idleTime"
+        );
+        assert_eq!(
+            AUTO_LOGIN_USER.args("delete"),
+            [
+                "delete",
+                "/Library/Preferences/com.apple.loginwindow",
+                "autoLoginUser"
+            ]
+        );
     }
 
     #[test]

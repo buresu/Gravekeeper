@@ -1097,21 +1097,11 @@ pub fn set_security_notifications_user(_enabled: bool) -> io::Result<()> {
     Err(unsupported())
 }
 
-// --- macOS only ------------------------------------------------------------------------
-
 pub fn disk_off() -> io::Result<bool> {
     Err(unsupported())
 }
 
 pub fn set_disk_off(_enabled: bool) -> io::Result<()> {
-    Err(unsupported())
-}
-
-pub fn app_nap_enabled() -> io::Result<bool> {
-    Err(unsupported())
-}
-
-pub fn set_app_nap(_enabled: bool) -> io::Result<()> {
     Err(unsupported())
 }
 

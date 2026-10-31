@@ -44,6 +44,14 @@ pub enum Task {
     AutomaticSleep { enabled: bool },
     /// Turns the display-off timeout on or off. Only where it is machine-wide, as above.
     DisplayOff { enabled: bool },
+    /// Turns the disk-off timeout on or off. Only where it is machine-wide, as above.
+    DiskOff { enabled: bool },
+    /// Turns starting up after a power failure on or off (macOS, machine-wide).
+    RestartAfterPowerFailure { enabled: bool },
+    /// Turns waking for network access (Wake on LAN) on or off (macOS, machine-wide).
+    WakeForNetwork { enabled: bool },
+    /// Turns the Bluetooth Setup Assistant at startup on or off (macOS, machine-wide).
+    BluetoothSetupAssistant { enabled: bool },
     /// Enables or disables hibernation (system-wide; manages hiberfil.sys).
     Hibernate { enabled: bool },
     /// Turns Windows Security (Defender) notifications on or off (machine-wide).
@@ -57,7 +65,7 @@ impl Task {
         match *self {
             Task::AutomaticUpdates { enabled } => os_settings::set_automatic_updates(enabled),
             Task::AutoLogin { enabled } => os_settings::set_auto_login(enabled),
-            Task::AutomaticSleep { .. } | Task::DisplayOff { .. }
+            Task::AutomaticSleep { .. } | Task::DisplayOff { .. } | Task::DiskOff { .. }
                 if !os_settings::POWER_NEEDS_ADMIN =>
             {
                 Err(io::Error::new(
@@ -67,6 +75,14 @@ impl Task {
             }
             Task::AutomaticSleep { enabled } => os_settings::set_automatic_sleep(enabled),
             Task::DisplayOff { enabled } => os_settings::set_display_off(enabled),
+            Task::DiskOff { enabled } => os_settings::set_disk_off(enabled),
+            Task::RestartAfterPowerFailure { enabled } => {
+                os_settings::set_restart_after_power_failure(enabled)
+            }
+            Task::WakeForNetwork { enabled } => os_settings::set_wake_for_network(enabled),
+            Task::BluetoothSetupAssistant { enabled } => {
+                os_settings::set_bluetooth_setup_assistant(enabled)
+            }
             Task::Hibernate { enabled } => os_settings::set_hibernate(enabled),
             Task::SecurityNotifications { enabled } => {
                 os_settings::set_security_notifications(enabled)
@@ -83,6 +99,12 @@ impl fmt::Display for Task {
             Task::AutoLogin { enabled } => ("automatic logon", enabled),
             Task::AutomaticSleep { enabled } => ("automatic sleep", enabled),
             Task::DisplayOff { enabled } => ("the display-off timeout", enabled),
+            Task::DiskOff { enabled } => ("the disk-off timeout", enabled),
+            Task::RestartAfterPowerFailure { enabled } => {
+                ("starting up after a power failure", enabled)
+            }
+            Task::WakeForNetwork { enabled } => ("waking for network access", enabled),
+            Task::BluetoothSetupAssistant { enabled } => ("the Bluetooth Setup Assistant", enabled),
             Task::Hibernate { enabled } => ("hibernation", enabled),
             Task::SecurityNotifications { enabled } => ("Windows Security notifications", enabled),
             Task::Firewall { enabled } => ("the firewall", enabled),
@@ -753,6 +775,10 @@ mod tests {
             Task::AutoLogin { enabled: true },
             Task::AutomaticSleep { enabled: false },
             Task::DisplayOff { enabled: true },
+            Task::DiskOff { enabled: false },
+            Task::RestartAfterPowerFailure { enabled: true },
+            Task::WakeForNetwork { enabled: true },
+            Task::BluetoothSetupAssistant { enabled: false },
             Task::Hibernate { enabled: false },
             Task::SecurityNotifications { enabled: false },
             Task::Firewall { enabled: false },

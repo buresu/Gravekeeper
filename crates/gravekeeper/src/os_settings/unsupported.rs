@@ -84,11 +84,3 @@ pub fn firewall_enabled() -> io::Result<bool> {
 pub fn set_firewall(_enabled: bool) -> io::Result<()> {
     Err(unsupported())
 }
-
-pub fn app_nap_enabled() -> io::Result<bool> {
-    Err(unsupported())
-}
-
-pub fn set_app_nap(_enabled: bool) -> io::Result<()> {
-    Err(unsupported())
-}

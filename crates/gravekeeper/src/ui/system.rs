@@ -21,7 +21,8 @@ pub struct SystemView {
     automatic_sleep: Option<Result<bool, String>>,
     /// Whether the display turns off on its own. Changed like `automatic_sleep`.
     display_off: Option<Result<bool, String>>,
-    /// Whether hard disks turn off on their own (Windows). Changed in-process (no elevation).
+    /// Whether hard disks turn off on their own (Windows, macOS). Changed like
+    /// `automatic_sleep`.
     disk_off: Option<Result<bool, String>>,
     /// Whether hibernation is enabled. Changed through `elevate`.
     hibernate: Option<Result<bool, String>>,
@@ -34,8 +35,14 @@ pub struct SystemView {
     security_user_pending: Option<bool>,
     /// Whether the firewall is on. Changed through `elevate`.
     firewall: Option<Result<bool, String>>,
-    /// Whether macOS App Nap is on. Changed in-process (no elevation).
+    /// macOS only. App Nap, the screen saver and reopening apps are per-user and changed
+    /// in-process; the others go through `elevate`.
     app_nap: Option<Result<bool, String>>,
+    screen_saver: Option<Result<bool, String>>,
+    reopen_apps: Option<Result<bool, String>>,
+    restart_after_power_failure: Option<Result<bool, String>>,
+    wake_for_network: Option<Result<bool, String>>,
+    bluetooth_setup_assistant: Option<Result<bool, String>>,
     /// A change waiting for administrator approval and the elevated helper. Only one runs at a
     /// time, so every control is disabled while it is set.
     elevation: Option<mpsc::Receiver<Result<(), elevate::Error>>>,
@@ -68,6 +75,11 @@ impl SystemView {
         self.security_notifications = None;
         self.firewall = None;
         self.app_nap = None;
+        self.screen_saver = None;
+        self.reopen_apps = None;
+        self.restart_after_power_failure = None;
+        self.wake_for_network = None;
+        self.bluetooth_setup_assistant = None;
         match result {
             Ok(()) => {
                 self.error = None;
@@ -139,6 +151,38 @@ impl SystemView {
                         Some(auto_login_help),
                         |ui| self.auto_login_control(ui, busy),
                     );
+                    if cfg!(target_os = "macos") {
+                        form::row(
+                            ui,
+                            "Reopen apps at login",
+                            Some("When off, macOS does not open the apps that were open before a restart or logout, so apps Gravekeeper starts are not started twice. Needs no administrator rights."),
+                            |ui| {
+                                let cached = &mut self.reopen_apps;
+                                direct_toggle(
+                                    ui,
+                                    busy,
+                                    cached,
+                                    os_settings::reopen_apps_enabled,
+                                    os_settings::set_reopen_apps,
+                                    &mut self.error,
+                                );
+                            },
+                        );
+                        form::row(
+                            ui,
+                            "Bluetooth Setup Assistant",
+                            Some("When off, the Bluetooth Setup Assistant no longer opens at startup when no keyboard or mouse is found. Asks for administrator rights."),
+                            |ui| {
+                                let state = read_once(
+                                    &mut self.bluetooth_setup_assistant,
+                                    os_settings::bluetooth_setup_assistant,
+                                );
+                                self.elevated_toggle(ui, busy, state, |enabled| {
+                                    Task::BluetoothSetupAssistant { enabled }
+                                });
+                            },
+                        );
+                    }
                 });
 
                 form::section(ui, "Power", None, |ui| {
@@ -152,20 +196,14 @@ impl SystemView {
                         "Automatic sleep",
                         Some(&format!("When off, the computer never sleeps on its own. {rights}")),
                         |ui| {
-                            if os_settings::POWER_NEEDS_ADMIN {
-                                let state = read_once(&mut self.automatic_sleep, os_settings::automatic_sleep);
-                                self.elevated_toggle(ui, busy, state, |enabled| Task::AutomaticSleep { enabled });
-                            } else {
-                                let cached = &mut self.automatic_sleep;
-                                direct_toggle(
-                                    ui,
-                                    busy,
-                                    cached,
-                                    os_settings::automatic_sleep,
-                                    os_settings::set_automatic_sleep,
-                                    &mut self.error,
-                                );
-                            }
+                            self.power_toggle(
+                                ui,
+                                busy,
+                                |view| &mut view.automatic_sleep,
+                                os_settings::automatic_sleep,
+                                os_settings::set_automatic_sleep,
+                                |enabled| Task::AutomaticSleep { enabled },
+                            );
                         },
                     );
                     form::row(
@@ -173,37 +211,83 @@ impl SystemView {
                         "Turn off the display",
                         Some(&format!("When off, the display never turns off on its own. {rights}")),
                         |ui| {
-                            if os_settings::POWER_NEEDS_ADMIN {
-                                let state = read_once(&mut self.display_off, os_settings::display_off);
-                                self.elevated_toggle(ui, busy, state, |enabled| Task::DisplayOff { enabled });
-                            } else {
-                                let cached = &mut self.display_off;
+                            self.power_toggle(
+                                ui,
+                                busy,
+                                |view| &mut view.display_off,
+                                os_settings::display_off,
+                                os_settings::set_display_off,
+                                |enabled| Task::DisplayOff { enabled },
+                            );
+                        },
+                    );
+                    if cfg!(target_os = "macos") {
+                        form::row(
+                            ui,
+                            "Screen saver",
+                            Some("When off, the screen saver never starts on its own. Needs no administrator rights."),
+                            |ui| {
+                                let cached = &mut self.screen_saver;
                                 direct_toggle(
                                     ui,
                                     busy,
                                     cached,
-                                    os_settings::display_off,
-                                    os_settings::set_display_off,
+                                    os_settings::screen_saver_enabled,
+                                    os_settings::set_screen_saver,
                                     &mut self.error,
                                 );
-                            }
-                        },
-                    );
-                    if cfg!(windows) {
+                            },
+                        );
+                    }
+                    if cfg!(any(windows, target_os = "macos")) {
+                        let disk_help = per_os(
+                            "When off, hard disks never turn off on their own. Needs no administrator rights.",
+                            "",
+                            "When off, hard disk drives (such as external ones) never spin down on their own; SSDs are not affected. Asks for administrator rights.",
+                        );
                         form::row(
                             ui,
                             "Turn off hard disks",
-                            Some("When off, hard disks never turn off on their own. Needs no administrator rights."),
+                            Some(disk_help),
                             |ui| {
-                                let cached = &mut self.disk_off;
-                                direct_toggle(
+                                self.power_toggle(
                                     ui,
                                     busy,
-                                    cached,
+                                    |view| &mut view.disk_off,
                                     os_settings::disk_off,
                                     os_settings::set_disk_off,
-                                    &mut self.error,
+                                    |enabled| Task::DiskOff { enabled },
                                 );
+                            },
+                        );
+                    }
+                    if cfg!(target_os = "macos") {
+                        form::row(
+                            ui,
+                            "Start up after a power failure",
+                            Some("When on, the Mac starts up on its own when power comes back. Asks for administrator rights."),
+                            |ui| {
+                                let state = read_once(
+                                    &mut self.restart_after_power_failure,
+                                    os_settings::restart_after_power_failure,
+                                );
+                                self.elevated_toggle(ui, busy, state, |enabled| {
+                                    Task::RestartAfterPowerFailure { enabled }
+                                });
+                            },
+                        );
+                        form::row(
+                            ui,
+                            "Wake for network access",
+                            Some("When on, network access (Wake on LAN) wakes the Mac from sleep. Asks for administrator rights."),
+                            |ui| {
+                                let state = read_once(
+                                    &mut self.wake_for_network,
+                                    os_settings::wake_for_network,
+                                );
+                                self.elevated_toggle(ui, busy, state, |enabled| {
+                                    Task::WakeForNetwork { enabled }
+                                });
                             },
                         );
                     }
@@ -292,6 +376,28 @@ impl SystemView {
                     });
                 }
             });
+    }
+
+    /// A checkbox for a power setting: changed through `elevate` where power settings are
+    /// machine-wide (macOS), in-process elsewhere.
+    fn power_toggle(
+        &mut self,
+        ui: &mut egui::Ui,
+        busy: bool,
+        field: fn(&mut Self) -> &mut Option<Result<bool, String>>,
+        read: fn() -> std::io::Result<bool>,
+        apply: fn(bool) -> std::io::Result<()>,
+        task: fn(bool) -> Task,
+    ) {
+        if os_settings::POWER_NEEDS_ADMIN {
+            let state = read_once(field(self), read);
+            self.elevated_toggle(ui, busy, state, task);
+        } else {
+            // Taken out while in use, as `direct_toggle` also needs `self.error`.
+            let mut cached = field(self).take();
+            direct_toggle(ui, busy, &mut cached, read, apply, &mut self.error);
+            *field(self) = cached;
+        }
     }
 
     /// A checkbox for a setting changed through `elevate`.
