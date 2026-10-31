@@ -30,6 +30,11 @@ zbus.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
+# Hiding the Dock icon while the window is hidden (the app's activation policy).
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication"] }
+# Same winit as eframe; only to start without a Dock icon when the window starts hidden.
+winit = { version = "0.30", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [

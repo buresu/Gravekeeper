@@ -7,7 +7,7 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 | Window | ✅ KDE Plasma | ✅ via XWayland | 🧪 | 🧪 |
 | CJK font fallback | ✅ Noto Sans CJK | ✅ | 🧪 | 🧪 |
 | Tray icon and menu | ✅ KDE | ✅ KDE | 🧪 | 🧪 |
-| Close to tray | ✅ Destroy | ✅ Destroy / Hide | 🧪 Destroy | 🧪 Hide |
+| Close to tray | ✅ Destroy | ✅ Destroy / Hide | 🧪 Destroy | ✅ Hide (Dock icon hidden while closed) |
 | Start with `--minimized` | ✅ | ✅ | 🧪 | 🧪 |
 | Stop process with descendants | ✅ process group | ✅ | 🧪 Job Object | 🧪 process group |
 | Graceful stop request | ✅ SIGTERM | ✅ | ⏳ killed immediately | 🧪 SIGTERM |
@@ -86,7 +86,8 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 
 ### macOS
 
-- **Tray**: must be created on the main thread after the event loop starts, so it is created inside eframe's app-creation callback.
+- **Tray**: must be created on the main thread after the event loop starts, so it is created inside eframe's app-creation callback. It shows only the icon in the menu bar, without the app's name.
+- **Dock**: the Dock icon is shown only while the window is; with the window closed (or after a minimized start) Gravekeeper is reachable only from the menu bar.
 - **Gatekeeper**: signing and notarization of release builds are handled in Phase 3.
 - **Disks**: of the system volume's helper mounts under `/System/Volumes/`, only `/System/Volumes/Data` is monitored.
 - **System settings**: unlike Windows and Linux, the power settings are machine-wide on macOS (System Settings asks for an administrator to change them), so automatic sleep and turning off the display ask for administrator rights too. Values replaced by turning a setting off are recorded in `/Library/Application Support/Gravekeeper/os-settings-backup.json` (written by the elevated helper) and restored when it is turned on again. Settings pushed by a configuration profile (MDM) override these and are not shown.

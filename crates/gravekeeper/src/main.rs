@@ -2,6 +2,7 @@
 
 mod autostart;
 mod cli;
+mod dock;
 mod elevate;
 mod gui;
 mod headless;

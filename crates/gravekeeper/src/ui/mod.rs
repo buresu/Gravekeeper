@@ -312,8 +312,12 @@ impl<'a> GravekeeperApp<'a> {
 impl eframe::App for GravekeeperApp<'_> {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_close_request(ctx);
-        if let (Some(shell), Some(item)) = (&self.shell, &self.tray_window_item) {
-            item.set_shown(shell.window_shown());
+        if let Some(shell) = &self.shell {
+            let shown = shell.window_shown();
+            if let Some(item) = &self.tray_window_item {
+                item.set_shown(shown);
+            }
+            crate::dock::set_window_shown(shown);
         }
     }
 

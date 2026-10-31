@@ -113,6 +113,9 @@ impl Shell {
         }
         match action {
             TrayAction::Show => {
+                // Before the window appears, so it opens in front (tray events arrive on the
+                // main thread on macOS).
+                crate::dock::set_window_shown(true);
                 self.ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                 self.ctx
                     .send_viewport_cmd(ViewportCommand::Minimized(false));

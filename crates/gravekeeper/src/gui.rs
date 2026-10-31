@@ -162,7 +162,7 @@ fn run_window(
         width: 128,
         height: 128,
     };
-    let native_options = eframe::NativeOptions {
+    let mut native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Gravekeeper")
             .with_app_id(APP_ID)
@@ -172,6 +172,10 @@ fn run_window(
         renderer: renderer(),
         ..Default::default()
     };
+    crate::dock::configure(
+        &mut native_options,
+        options.start_minimized && options.close == CloseBehavior::Hide,
+    );
 
     shell.set_window_open(true);
     // From here on tray actions go to the window. Whatever reached the main loop before is

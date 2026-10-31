@@ -140,6 +140,7 @@ What closing the main window does (`CloseBehavior`) has a per-OS default.
 - The same `egui::Context` is passed to every `run_native_ext` call, so the `Notifier` stays valid when the window is recreated. The selected tab and application are saved with eframe's persistence and restored with the window.
 - Tray callbacks may run on any thread. `Shell::handle` sends a `ViewportCommand` while a window exists, and otherwise (`Destroy` mode) sends the action to the main loop's channel.
 - A minimized start creates no window in `Destroy` mode. In `Hide` mode the window is created hidden, but eframe shows every window after its first frame, so the app sends `Visible(false)` at creation, which takes effect right after that show.
+- On macOS the Dock icon is shown only while the window is (`dock.rs`): the app's activation policy is switched between `Regular` and `Accessory` whenever the window's shown state changes, and showing it also activates the app, since an `Accessory` app's window would otherwise open behind the others. A minimized start sets `Accessory` on winit's event loop builder, so no icon appears at launch. The tray item has no title on macOS, where it would be text next to the icon in the menu bar.
 - Quitting from the window asks for confirmation when applications are running; quitting from the tray does not.
 - `GRAVEKEEPER_CLOSE_BEHAVIOR=hide|destroy|quit` overrides the default (for testing).
 

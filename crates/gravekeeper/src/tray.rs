@@ -85,14 +85,18 @@ pub fn create(shell: &Arc<Shell>) -> Result<Tray, Box<dyn std::error::Error>> {
     let icon = tray_icon::Icon::from_rgba(crate::icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE)
         .expect("generated icon has a valid size");
 
-    let tray = TrayIconBuilder::new()
+    let mut builder = TrayIconBuilder::new()
         .with_id("gravekeeper")
-        .with_title("Gravekeeper")
         .with_tooltip("Gravekeeper")
         .with_icon(icon)
         .with_menu(Box::new(menu))
-        .with_menu_on_left_click(false)
-        .build()?;
+        .with_menu_on_left_click(false);
+    // The ksni backend uses the title as the item's name. On macOS it is text shown next to the
+    // icon in the menu bar, where an app shows only its icon.
+    if !cfg!(target_os = "macos") {
+        builder = builder.with_title("Gravekeeper");
+    }
+    let tray = builder.build()?;
 
     let on_menu = Arc::clone(shell);
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| match event.id.as_ref() {
