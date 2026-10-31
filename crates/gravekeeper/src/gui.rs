@@ -37,12 +37,12 @@ pub fn run(paths: Paths, start_minimized: bool, process_started: Instant) -> Exi
                 eframe::NativeOptions {
                     viewport: egui::ViewportBuilder::default()
                         .with_title("Gravekeeper")
-                        .with_inner_size([380.0, 120.0]),
+                        .with_inner_size(ui::AlreadyRunning::WINDOW_SIZE),
                     renderer: renderer(),
                     persist_window: false,
                     ..Default::default()
                 },
-                Box::new(|_| Ok(Box::new(ui::AlreadyRunning))),
+                Box::new(|cc| Ok(Box::new(ui::AlreadyRunning::new(cc)))),
             );
             return ExitCode::from(3);
         }

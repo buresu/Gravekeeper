@@ -81,6 +81,7 @@ when = { kind = "weekly", days = ["mon", "thu"], time = "03:00" }
 action = { kind = "restart", app = "web" }
 missed = "run-once"        # "skip" (default) | "run-once"
 time_zone = "Asia/Tokyo"   # optional; the system time zone by default
+wake = true                # wake the computer from sleep for each run (Windows only)
 
 [[schedule]]
 id = "cleanup"
@@ -129,6 +130,8 @@ Applications with `autostart = true` start in the order they are listed. Each on
 **Time zones and DST.** Times are wall-clock times in `time_zone` (the system zone if absent). A time skipped by a DST change runs at the next valid instant; a time that occurs twice runs once, at the first occurrence.
 
 **Missed runs.** A run counts as missed when it is more than 2 minutes late — because Gravekeeper was not running or the computer was asleep. With `missed = "skip"` it is recorded (a `schedule_missed` event) and the next regular run is awaited; with `missed = "run-once"` it runs once as soon as possible, however many runs were missed. The time of the last run, and when the schedule was added or its timing (`when`, `time_zone`, `enabled`) last changed, are kept in the history database, so this also works across restarts — including a first run that was due before the schedule ever ran (e.g. a `once` schedule whose time passed while the computer was off). Runs due before the schedule was added or changed are never owed. A `run` action that is still running when the next run is due is not started twice; that run is skipped and recorded.
+
+**Waking the computer.** With `wake = true` (Windows only), the computer wakes from sleep a minute before each run, so the run is on time and not missed. Gravekeeper must be running when the computer goes to sleep, and the power plan must allow wake timers (see the System page). When the run starts, the display turns on and the idle timers restart; after that the computer sleeps again according to its power plan. Elsewhere a schedule with `wake = true` still runs, and a `schedule_failed` event says it could not wake the computer.
 
 ## Webhooks
 

@@ -40,6 +40,7 @@ fn run_schedule(name: &str, args: &[&str], timeout: Duration) -> ScheduleSpec {
         },
         missed: MissedRun::Skip,
         time_zone: Some("UTC".into()),
+        wake: false,
     }
 }
 
@@ -186,6 +187,7 @@ fn interval_schedules_control_applications() {
         },
         missed: MissedRun::Skip,
         time_zone: None,
+        wake: false,
     };
     let id = app.id.clone();
     let (_dir, core) = start_with(quiet(Config {
@@ -197,6 +199,40 @@ fn interval_schedules_control_applications() {
         s.app(&id).is_some_and(|a| a.state == AppState::Running)
     });
     assert!(has(&snapshot, EventKind::ScheduleSucceeded));
+}
+
+#[test]
+fn schedules_that_wake_set_the_timer_or_say_why_not() {
+    let mut schedule = run_schedule("wake", &["exit", "0"], Duration::from_secs(30));
+    schedule.wake = true;
+    let id = schedule.id.clone();
+    let (_dir, core) = start_with(quiet(Config {
+        schedules: vec![schedule],
+        ..Config::default()
+    }));
+    // Running it by hand publishes a snapshot, and does not turn the display on.
+    core.send(Command::RunSchedule(id));
+    let snapshot = wait_for(&core, "the run", |s| has(s, EventKind::ScheduleSucceeded));
+    let problems: Vec<_> = snapshot
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::ScheduleFailed)
+        .map(|e| e.message.as_str())
+        .collect();
+    if cfg!(windows) {
+        // Virtual machines often cannot be woken, and the OS says so.
+        assert!(
+            problems.iter().all(|m| m.contains("cannot be woken")),
+            "{problems:?}"
+        );
+    } else {
+        assert!(
+            problems
+                .iter()
+                .any(|m| m.contains("only supported on Windows")),
+            "{problems:?}"
+        );
+    }
 }
 
 #[test]

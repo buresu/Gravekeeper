@@ -13,7 +13,7 @@ use egui_kittest::kittest::Queryable;
 use gravekeeper_core::CoreHandle;
 use gravekeeper_core::paths::Paths;
 
-use super::{GravekeeperApp, Tab, theme};
+use super::{AlreadyRunning, GravekeeperApp, Tab, theme};
 use crate::shell::CloseBehavior;
 
 const CONFIG: &str = r#"
@@ -124,6 +124,21 @@ fn open_ui(
     });
     harness.run_steps(4);
     harness
+}
+
+#[test]
+fn the_already_running_notice_fits_its_window() {
+    let [width, height] = AlreadyRunning::WINDOW_SIZE;
+    // No context setup: the notice has to install its own theme, as it does at runtime.
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(width, height))
+        .build_eframe(|cc| AlreadyRunning::new(cc));
+    harness.run_steps(4);
+    let bottom = harness.get_by_label("OK").rect().bottom();
+    assert!(
+        bottom <= height,
+        "the button ends at {bottom}, below {height}"
+    );
 }
 
 #[test]

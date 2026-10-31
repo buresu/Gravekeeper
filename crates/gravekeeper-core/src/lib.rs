@@ -14,6 +14,7 @@ pub mod process;
 pub mod schedule;
 mod store;
 pub mod supervisor;
+pub mod wake;
 pub mod webhook;
 
 pub use api::{Command, Snapshot};

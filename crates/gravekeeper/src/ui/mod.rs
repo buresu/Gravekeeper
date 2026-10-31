@@ -414,6 +414,15 @@ impl eframe::App for GravekeeperApp<'_> {
 /// Shown instead of the main window when another instance is already supervising.
 pub struct AlreadyRunning;
 
+impl AlreadyRunning {
+    pub const WINDOW_SIZE: [f32; 2] = [380.0, 170.0];
+
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        theme::install(&cc.egui_ctx);
+        Self
+    }
+}
+
 impl eframe::App for AlreadyRunning {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default()

@@ -12,12 +12,16 @@ use super::{Engine, Internal, format_duration};
 use crate::api::{AppState, EventKind, EventLevel, ScheduleRun, ScheduleStatus};
 use crate::process::{ExitKind, LogBuffer, ManagedChild, ProcessSpec, Stream};
 use crate::schedule::{self, Action, MissedRun, ScheduleId, ScheduleSpec};
+use crate::wake::{self, WakeTimer};
 
 /// Re-check the wall clock at least this often, so sleep/resume and clock changes are
 /// noticed even though timers run on the monotonic clock.
 const RECHECK: Duration = Duration::from_secs(30);
 /// Output lines kept in memory per schedule.
 const LOG_LINES: usize = 1000;
+/// Wake the computer this long before a run, so it is back up when the run is due. Shorter than
+/// the couple of minutes Windows keeps a computer awake that a timer woke.
+const WAKE_LEAD: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 pub(super) struct State {
@@ -26,6 +30,9 @@ pub(super) struct State {
     /// When each schedule's timetable began (added, changed or enabled), also persisted.
     pub plans: HashMap<ScheduleId, SystemTime>,
     runtimes: HashMap<ScheduleId, Runtime>,
+    wake: WakeTimer,
+    /// What `wake` is set to, so it is only touched when this changes.
+    wake_at: Option<SystemTime>,
 }
 
 struct Runtime {
@@ -175,6 +182,31 @@ impl Engine {
         Some(Instant::now() + wait.min(RECHECK))
     }
 
+    /// Keeps the wake timer on the soonest run that should wake the computer.
+    pub(super) fn arm_wake(&mut self) {
+        let at = self
+            .schedules
+            .runtimes
+            .values()
+            .filter(|rt| rt.spec.wake)
+            .filter_map(|rt| rt.next)
+            .min()
+            .map(|next| next.checked_sub(WAKE_LEAD).unwrap_or(next));
+        if at == self.schedules.wake_at {
+            return;
+        }
+        self.schedules.wake_at = at;
+        if let Err(err) = self.schedules.wake.set(at) {
+            let message = at.map_or_else(|| err.to_string(), |at| wake::describe(&err, at));
+            self.emit(
+                EventLevel::Warning,
+                EventKind::ScheduleFailed,
+                None,
+                message,
+            );
+        }
+    }
+
     pub(super) fn on_schedule_timers(&mut self) {
         let now = SystemTime::now();
         let due: Vec<ScheduleId> = self
@@ -229,6 +261,9 @@ impl Engine {
         let spec = self.schedules.runtimes[id].spec.clone();
         if !manual {
             self.reschedule(id, now);
+            if spec.wake {
+                wake::keep_awake();
+            }
         }
         if self.schedules.runtimes[id].running.is_some() {
             self.emit(

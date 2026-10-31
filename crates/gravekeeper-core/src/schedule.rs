@@ -47,6 +47,10 @@ pub struct ScheduleSpec {
     /// IANA time zone name such as `Asia/Tokyo`; the system time zone when absent.
     #[serde(default)]
     pub time_zone: Option<String>,
+    /// Wake the computer from sleep for this schedule's runs, where the OS allows it (see
+    /// [`crate::wake`]).
+    #[serde(default)]
+    pub wake: bool,
 }
 
 impl ScheduleSpec {
@@ -443,6 +447,7 @@ mod tests {
             },
             missed,
             time_zone: Some("UTC".into()),
+            wake: false,
         }
     }
 
@@ -660,6 +665,7 @@ mod tests {
             },
             missed: MissedRun::Skip,
             time_zone: Some("Mars/Olympus".into()),
+            wake: false,
         };
         let errors = validate(&spec);
         assert_eq!(errors.len(), 4, "{errors:?}");

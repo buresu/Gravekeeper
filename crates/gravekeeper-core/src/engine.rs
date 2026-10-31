@@ -371,6 +371,7 @@ impl Engine {
     async fn run(mut self) {
         self.start_notifications();
         loop {
+            self.arm_wake();
             let deadline = [self.next_deadline(), self.schedule_deadline()]
                 .into_iter()
                 .flatten()

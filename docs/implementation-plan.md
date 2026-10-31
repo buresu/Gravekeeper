@@ -150,6 +150,8 @@ Requested before Phase 4: native file dialogs and a less dated look.
   - [x] Power: turn off hard disks on/off (Windows; no elevation. macOS: elevated, `pmset disksleep`)
   - [x] Power: hibernation on/off (Windows; elevated, `powercfg /hibernate`. Linux: elevated, systemd `sleep.conf.d` drop-in)
   - [x] Power: macOS sleep, display and hibernation settings (elevated, `pmset`)
+  - [x] Windows: wake timers, screen saver (no elevation); requiring sign-in on wake, lock screen, locking when inactive, Wake on LAN (elevated)
+  - [x] Schedules that wake the computer from sleep (Windows; waitable timer)
   - [x] App Nap on/off (macOS; per-user `NSAppSleepDisabled`, no elevation)
   - [x] macOS: screen saver, reopening apps at login (per-user); starting up after a power failure, wake for network access, Bluetooth Setup Assistant at startup (elevated)
 - MCP server and a control API for AI agents (with allow lists, audit logs and access control)

@@ -35,13 +35,20 @@ pub struct SystemView {
     security_user_pending: Option<bool>,
     /// Whether the firewall is on. Changed through `elevate`.
     firewall: Option<Result<bool, String>>,
-    /// macOS only. App Nap, the screen saver and reopening apps are per-user and changed
-    /// in-process; the others go through `elevate`.
-    app_nap: Option<Result<bool, String>>,
+    /// Windows and macOS. Per-user, changed in-process.
     screen_saver: Option<Result<bool, String>>,
+    /// Windows and macOS. Changed through `elevate`.
+    wake_for_network: Option<Result<bool, String>>,
+    /// Windows only. Wake timers are changed in-process; the others go through `elevate`.
+    wake_timers: Option<Result<bool, String>>,
+    sign_in_on_wake: Option<Result<bool, String>>,
+    lock_screen: Option<Result<bool, String>>,
+    inactivity_lock: Option<Result<bool, String>>,
+    /// macOS only. App Nap and reopening apps are per-user and changed in-process; the others
+    /// go through `elevate`.
+    app_nap: Option<Result<bool, String>>,
     reopen_apps: Option<Result<bool, String>>,
     restart_after_power_failure: Option<Result<bool, String>>,
-    wake_for_network: Option<Result<bool, String>>,
     bluetooth_setup_assistant: Option<Result<bool, String>>,
     /// A change waiting for administrator approval and the elevated helper. Only one runs at a
     /// time, so every control is disabled while it is set.
@@ -79,6 +86,10 @@ impl SystemView {
         self.reopen_apps = None;
         self.restart_after_power_failure = None;
         self.wake_for_network = None;
+        self.wake_timers = None;
+        self.sign_in_on_wake = None;
+        self.lock_screen = None;
+        self.inactivity_lock = None;
         self.bluetooth_setup_assistant = None;
         match result {
             Ok(()) => {
@@ -151,6 +162,50 @@ impl SystemView {
                         Some(auto_login_help),
                         |ui| self.auto_login_control(ui, busy),
                     );
+                    if cfg!(windows) {
+                        form::row(
+                            ui,
+                            "Require sign-in on wake",
+                            Some("When off, Windows does not ask for the password when the computer wakes from sleep. Asks for administrator rights."),
+                            |ui| {
+                                let state = read_once(
+                                    &mut self.sign_in_on_wake,
+                                    os_settings::sign_in_on_wake,
+                                );
+                                self.elevated_toggle(ui, busy, state, |enabled| {
+                                    Task::SignInOnWake { enabled }
+                                });
+                            },
+                        );
+                        form::row(
+                            ui,
+                            "Lock screen",
+                            Some("When off, a policy asks Windows to skip the lock screen and go straight to sign-in. Not every installation honors it. Asks for administrator rights."),
+                            |ui| {
+                                let state = read_once(
+                                    &mut self.lock_screen,
+                                    os_settings::lock_screen_enabled,
+                                );
+                                self.elevated_toggle(ui, busy, state, |enabled| {
+                                    Task::LockScreen { enabled }
+                                });
+                            },
+                        );
+                        form::row(
+                            ui,
+                            "Lock when inactive",
+                            Some("When on, Windows locks the computer after a period of inactivity: the previous limit, or 15 minutes if there was none. Asks for administrator rights."),
+                            |ui| {
+                                let state = read_once(
+                                    &mut self.inactivity_lock,
+                                    os_settings::inactivity_lock_enabled,
+                                );
+                                self.elevated_toggle(ui, busy, state, |enabled| {
+                                    Task::InactivityLock { enabled }
+                                });
+                            },
+                        );
+                    }
                     if cfg!(target_os = "macos") {
                         form::row(
                             ui,
@@ -221,11 +276,16 @@ impl SystemView {
                             );
                         },
                     );
-                    if cfg!(target_os = "macos") {
+                    if cfg!(any(windows, target_os = "macos")) {
+                        let screen_saver_help = per_os(
+                            "When off, the screen saver never starts on its own. Turning it on needs one chosen in the Windows screen saver settings. Needs no administrator rights.",
+                            "",
+                            "When off, the screen saver never starts on its own. Needs no administrator rights.",
+                        );
                         form::row(
                             ui,
                             "Screen saver",
-                            Some("When off, the screen saver never starts on its own. Needs no administrator rights."),
+                            Some(screen_saver_help),
                             |ui| {
                                 let cached = &mut self.screen_saver;
                                 direct_toggle(
@@ -276,10 +336,17 @@ impl SystemView {
                                 });
                             },
                         );
+                    }
+                    if cfg!(any(windows, target_os = "macos")) {
+                        let wake_help = per_os(
+                            "When on, a Wake on LAN magic packet wakes the computer from sleep. The firmware and network adapter must support it, and a driver may apply it only after a restart. Asks for administrator rights.",
+                            "",
+                            "When on, network access (Wake on LAN) wakes the Mac from sleep. Asks for administrator rights.",
+                        );
                         form::row(
                             ui,
                             "Wake for network access",
-                            Some("When on, network access (Wake on LAN) wakes the Mac from sleep. Asks for administrator rights."),
+                            Some(wake_help),
                             |ui| {
                                 let state = read_once(
                                     &mut self.wake_for_network,
@@ -288,6 +355,24 @@ impl SystemView {
                                 self.elevated_toggle(ui, busy, state, |enabled| {
                                     Task::WakeForNetwork { enabled }
                                 });
+                            },
+                        );
+                    }
+                    if cfg!(windows) {
+                        form::row(
+                            ui,
+                            "Wake timers",
+                            Some("When on, timers may wake the computer from sleep. Schedules set to wake the computer need this. \"Important wake timers only\" counts as off. Needs no administrator rights."),
+                            |ui| {
+                                let cached = &mut self.wake_timers;
+                                direct_toggle(
+                                    ui,
+                                    busy,
+                                    cached,
+                                    os_settings::wake_timers,
+                                    os_settings::set_wake_timers,
+                                    &mut self.error,
+                                );
                             },
                         );
                     }

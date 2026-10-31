@@ -324,6 +324,9 @@ pub fn describe_when(spec: &ScheduleSpec) -> String {
     if let Some(tz) = &spec.time_zone {
         text.push_str(&format!(" ({tz})"));
     }
+    if spec.wake {
+        text.push_str(", waking the computer");
+    }
     if !spec.enabled {
         text.push_str(" — disabled");
     }
@@ -399,6 +402,7 @@ struct ScheduleEditor {
     timeout: u64,
     missed: MissedRun,
     time_zone: String,
+    wake: bool,
     errors: Vec<String>,
     picker: Picker<Field>,
 }
@@ -435,6 +439,7 @@ impl ScheduleEditor {
             timeout: schedule::default_run_timeout().as_secs(),
             missed: MissedRun::Skip,
             time_zone: String::new(),
+            wake: false,
             errors: Vec::new(),
             picker: Picker::default(),
         }
@@ -448,6 +453,7 @@ impl ScheduleEditor {
             enabled: spec.enabled,
             missed: spec.missed,
             time_zone: spec.time_zone.clone().unwrap_or_default(),
+            wake: spec.wake,
             ..Self::blank()
         };
         match &spec.when {
@@ -524,6 +530,7 @@ impl ScheduleEditor {
             timeout: schedule::default_run_timeout().as_secs(),
             missed: MissedRun::Skip,
             time_zone: String::new(),
+            wake: false,
             errors: Vec::new(),
             picker: Picker::default(),
         }
@@ -603,6 +610,8 @@ impl ScheduleEditor {
             action,
             missed: self.missed,
             time_zone: (!tz.is_empty()).then(|| tz.to_owned()),
+            // A run after boot has nothing to wake: the computer has just started.
+            wake: self.wake && self.when != WhenKind::AfterBoot,
         };
         errors.extend(schedule::validate(&spec));
         if errors.is_empty() {
@@ -693,6 +702,11 @@ impl ScheduleEditor {
                             }
                         });
                     });
+                    if gravekeeper_core::wake::SUPPORTED {
+                        form::row(ui, "Wake the computer", Some("Wakes the computer from sleep a minute before each run. Gravekeeper must be running, and wake timers allowed on the System page."), |ui| {
+                            ui.checkbox(&mut self.wake, "Enabled");
+                        });
+                    }
                 }
             });
 
@@ -792,6 +806,20 @@ mod tests {
                 "{when}"
             );
         }
+    }
+
+    #[test]
+    fn waking_is_kept_except_after_boot() {
+        let mut spec: ScheduleSpec = toml::from_str(
+            "id = \"s\"\nname = \"n\"\nwhen = { kind = \"daily\", time = \"09:30:00\" }\naction = { kind = \"run\", program = \"/bin/x\", timeout = 60 }\nwake = true",
+        )
+        .unwrap();
+        assert!(spec.wake);
+        assert!(ScheduleEditor::from_spec(&spec).build().unwrap().wake);
+        spec.when = When::AfterBoot {
+            delay: Duration::from_secs(60),
+        };
+        assert!(!ScheduleEditor::from_spec(&spec).build().unwrap().wake);
     }
 
     #[test]

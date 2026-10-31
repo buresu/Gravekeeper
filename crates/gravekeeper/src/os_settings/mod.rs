@@ -109,31 +109,69 @@ pub(crate) fn set_firewall(enabled: bool) -> io::Result<()> {
     imp::set_firewall(enabled)
 }
 
-/// Declares settings that exist only on macOS; elsewhere they report `Unsupported`.
-macro_rules! macos_only {
-    ($($(#[$attr:meta])* $vis:vis fn $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {$(
+/// Whether the screen saver starts after a period of inactivity. Windows and macOS.
+pub fn screen_saver_enabled() -> io::Result<bool> {
+    imp::screen_saver_enabled()
+}
+
+/// Turns the screen saver on or off for the current user. Needs no administrator rights.
+pub fn set_screen_saver(enabled: bool) -> io::Result<()> {
+    imp::set_screen_saver(enabled)
+}
+
+/// Whether network access (Wake on LAN) wakes the computer from sleep. Windows and macOS.
+pub fn wake_for_network() -> io::Result<bool> {
+    imp::wake_for_network()
+}
+
+/// Needs administrator rights (goes through `elevate`).
+pub(crate) fn set_wake_for_network(enabled: bool) -> io::Result<()> {
+    imp::set_wake_for_network(enabled)
+}
+
+/// Declares settings that exist on one OS only; elsewhere they report `Unsupported`.
+macro_rules! only_on {
+    ($os:literal, $why:literal, $($(#[$attr:meta])* $vis:vis fn $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {$(
         $(#[$attr])*
         $vis fn $name($($arg: $ty),*) -> io::Result<$ret> {
-            #[cfg(target_os = "macos")]
+            #[cfg(target_os = $os)]
             return imp::$name($($arg),*);
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_os = $os))]
             {
                 $(let _: $ty = $arg;)*
-                Err(io::Error::new(io::ErrorKind::Unsupported, "only on macOS"))
+                Err(io::Error::new(io::ErrorKind::Unsupported, $why))
             }
         }
     )*};
 }
 
-macos_only! {
+only_on! {
+    "windows", "only on Windows",
+    /// Whether wake timers may wake the computer from sleep. Only when they all may: "important
+    /// wake timers only" does not let Gravekeeper's through.
+    pub fn wake_timers() -> bool;
+    /// Allows or refuses wake timers. Needs no administrator rights, like the power timeouts.
+    pub fn set_wake_timers(enabled: bool) -> ();
+    /// Whether waking from sleep asks for the password.
+    pub fn sign_in_on_wake() -> bool;
+    /// Needs administrator rights (goes through `elevate`), unlike the power timeouts.
+    pub(crate) fn set_sign_in_on_wake(enabled: bool) -> ();
+    /// Whether the lock screen is shown before signing in.
+    pub fn lock_screen_enabled() -> bool;
+    /// Needs administrator rights (goes through `elevate`).
+    pub(crate) fn set_lock_screen(enabled: bool) -> ();
+    /// Whether the computer locks itself after a period of inactivity.
+    pub fn inactivity_lock_enabled() -> bool;
+    /// Needs administrator rights (goes through `elevate`).
+    pub(crate) fn set_inactivity_lock(enabled: bool) -> ();
+}
+
+only_on! {
+    "macos", "only on macOS",
     /// Whether App Nap may slow down apps that are not visible (its default).
     pub fn app_nap_enabled() -> bool;
     /// Turns App Nap on or off for the current user's apps. Needs no administrator rights.
     pub fn set_app_nap(enabled: bool) -> ();
-    /// Whether the screen saver starts after a period of inactivity.
-    pub fn screen_saver_enabled() -> bool;
-    /// Turns the screen saver on or off for the current user. Needs no administrator rights.
-    pub fn set_screen_saver(enabled: bool) -> ();
     /// Whether apps that were open at logout or restart are opened again at login.
     pub fn reopen_apps_enabled() -> bool;
     /// Turns reopening apps at login on or off for the current user. Needs no administrator
@@ -143,10 +181,6 @@ macos_only! {
     pub fn restart_after_power_failure() -> bool;
     /// Needs administrator rights (goes through `elevate`).
     pub(crate) fn set_restart_after_power_failure(enabled: bool) -> ();
-    /// Whether network access (Wake on LAN) wakes the computer from sleep.
-    pub fn wake_for_network() -> bool;
-    /// Needs administrator rights (goes through `elevate`).
-    pub(crate) fn set_wake_for_network(enabled: bool) -> ();
     /// Whether the Bluetooth Setup Assistant opens at startup when no keyboard or mouse is
     /// found.
     pub fn bluetooth_setup_assistant() -> bool;

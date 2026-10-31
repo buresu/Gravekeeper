@@ -712,11 +712,15 @@ const DEFAULT_AC_SECS: u32 = 30 * 60;
 const DEFAULT_DC_SECS: u32 = 15 * 60;
 const POWER_BACKUP_KEY: &str = r"SOFTWARE\Gravekeeper\Power";
 
-/// A power timeout: the GUIDs it is read and written by, and the HKCU value names its
-/// backup uses.
-struct Timeout {
+/// A value of the active power scheme: the GUIDs it is read and written by.
+struct PowerSetting {
     subgroup: GUID,
     setting: GUID,
+}
+
+/// A power timeout, and the HKCU value names its backup uses.
+struct Timeout {
+    power: PowerSetting,
     ac_backup: &'static str,
     dc_backup: &'static str,
 }
@@ -724,8 +728,10 @@ struct Timeout {
 fn standby() -> Timeout {
     use windows::Win32::System::SystemServices::{GUID_SLEEP_SUBGROUP, GUID_STANDBY_TIMEOUT};
     Timeout {
-        subgroup: GUID_SLEEP_SUBGROUP,
-        setting: GUID_STANDBY_TIMEOUT,
+        power: PowerSetting {
+            subgroup: GUID_SLEEP_SUBGROUP,
+            setting: GUID_STANDBY_TIMEOUT,
+        },
         ac_backup: "StandbyAc",
         dc_backup: "StandbyDc",
     }
@@ -736,8 +742,10 @@ fn display() -> Timeout {
         GUID_VIDEO_POWERDOWN_TIMEOUT, GUID_VIDEO_SUBGROUP,
     };
     Timeout {
-        subgroup: GUID_VIDEO_SUBGROUP,
-        setting: GUID_VIDEO_POWERDOWN_TIMEOUT,
+        power: PowerSetting {
+            subgroup: GUID_VIDEO_SUBGROUP,
+            setting: GUID_VIDEO_POWERDOWN_TIMEOUT,
+        },
         ac_backup: "VideoAc",
         dc_backup: "VideoDc",
     }
@@ -746,8 +754,10 @@ fn display() -> Timeout {
 fn disk() -> Timeout {
     use windows::Win32::System::SystemServices::{GUID_DISK_POWERDOWN_TIMEOUT, GUID_DISK_SUBGROUP};
     Timeout {
-        subgroup: GUID_DISK_SUBGROUP,
-        setting: GUID_DISK_POWERDOWN_TIMEOUT,
+        power: PowerSetting {
+            subgroup: GUID_DISK_SUBGROUP,
+            setting: GUID_DISK_POWERDOWN_TIMEOUT,
+        },
         ac_backup: "DiskAc",
         dc_backup: "DiskDc",
     }
@@ -771,7 +781,7 @@ fn active_scheme() -> io::Result<GUID> {
     Ok(scheme)
 }
 
-fn read_timeout(timeout: &Timeout) -> io::Result<(u32, u32)> {
+fn read_setting(power: &PowerSetting) -> io::Result<(u32, u32)> {
     use windows::Win32::System::Power::{PowerReadACValueIndex, PowerReadDCValueIndex};
 
     let scheme = active_scheme()?;
@@ -782,22 +792,22 @@ fn read_timeout(timeout: &Timeout) -> io::Result<(u32, u32)> {
         let _ = PowerReadACValueIndex(
             None,
             Some(&scheme),
-            Some(&timeout.subgroup),
-            Some(&timeout.setting),
+            Some(&power.subgroup),
+            Some(&power.setting),
             &mut ac,
         );
         let _ = PowerReadDCValueIndex(
             None,
             Some(&scheme),
-            Some(&timeout.subgroup),
-            Some(&timeout.setting),
+            Some(&power.subgroup),
+            Some(&power.setting),
             &mut dc,
         );
     }
     Ok((ac, dc))
 }
 
-fn write_timeout(timeout: &Timeout, ac: u32, dc: u32) -> io::Result<()> {
+fn write_setting(power: &PowerSetting, ac: u32, dc: u32) -> io::Result<()> {
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Power::{
         PowerSetActiveScheme, PowerWriteACValueIndex, PowerWriteDCValueIndex,
@@ -809,8 +819,8 @@ fn write_timeout(timeout: &Timeout, ac: u32, dc: u32) -> io::Result<()> {
         PowerWriteACValueIndex(
             None,
             &scheme,
-            Some(&timeout.subgroup),
-            Some(&timeout.setting),
+            Some(&power.subgroup),
+            Some(&power.setting),
             ac,
         )
     };
@@ -822,8 +832,8 @@ fn write_timeout(timeout: &Timeout, ac: u32, dc: u32) -> io::Result<()> {
         let _ = PowerWriteDCValueIndex(
             None,
             &scheme,
-            Some(&timeout.subgroup),
-            Some(&timeout.setting),
+            Some(&power.subgroup),
+            Some(&power.setting),
             dc,
         );
     }
@@ -853,6 +863,28 @@ fn run_powercfg(args: &[&str]) -> io::Result<()> {
     }
 }
 
+/// What `powercfg` prints. It uses the console code page, so only ASCII survives the
+/// conversion intact.
+fn powercfg_output(args: &[&str]) -> io::Result<String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = Command::new("powercfg.exe")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(io::Error::other(format!(
+            "powercfg exited with {}",
+            output.status
+        )))
+    }
+}
+
 /// Whether this computer runs on a battery. A desktop (no battery) only ever applies the
 /// AC timeout, so the on-battery (DC) value should be ignored when judging the state.
 fn has_battery() -> bool {
@@ -868,9 +900,9 @@ fn has_battery() -> bool {
     }
 }
 
-fn timeout_on(timeout: &Timeout) -> io::Result<bool> {
-    let (ac, dc) = read_timeout(timeout)?;
-    // On a desktop only the AC timeout is ever applied, so judge by it alone.
+fn setting_on(power: &PowerSetting) -> io::Result<bool> {
+    let (ac, dc) = read_setting(power)?;
+    // On a desktop only the AC value is ever applied, so judge by it alone.
     Ok(if has_battery() {
         ac != 0 || dc != 0
     } else {
@@ -892,25 +924,25 @@ fn set_timeout(timeout: &Timeout, enabled: bool) -> io::Result<()> {
             };
         let ac = restore(timeout.ac_backup, DEFAULT_AC_SECS);
         let dc = restore(timeout.dc_backup, DEFAULT_DC_SECS);
-        write_timeout(timeout, ac, dc)?;
+        write_setting(&timeout.power, ac, dc)?;
         if let Ok(key) = CURRENT_USER.options().read().write().open(POWER_BACKUP_KEY) {
             let _ = key.remove_value(timeout.ac_backup);
             let _ = key.remove_value(timeout.dc_backup);
         }
     } else {
-        let (ac, dc) = read_timeout(timeout)?;
+        let (ac, dc) = read_setting(&timeout.power)?;
         // Save the current values (even "never") so turning it back on restores exactly.
         if let Ok(key) = CURRENT_USER.create(POWER_BACKUP_KEY) {
             let _ = key.set_u32(timeout.ac_backup, ac);
             let _ = key.set_u32(timeout.dc_backup, dc);
         }
-        write_timeout(timeout, 0, 0)?;
+        write_setting(&timeout.power, 0, 0)?;
     }
     Ok(())
 }
 
 pub fn automatic_sleep() -> io::Result<bool> {
-    timeout_on(&standby())
+    setting_on(&standby().power)
 }
 
 pub fn set_automatic_sleep(enabled: bool) -> io::Result<()> {
@@ -918,7 +950,7 @@ pub fn set_automatic_sleep(enabled: bool) -> io::Result<()> {
 }
 
 pub fn display_off() -> io::Result<bool> {
-    timeout_on(&display())
+    setting_on(&display().power)
 }
 
 pub fn set_display_off(enabled: bool) -> io::Result<()> {
@@ -926,11 +958,247 @@ pub fn set_display_off(enabled: bool) -> io::Result<()> {
 }
 
 pub fn disk_off() -> io::Result<bool> {
-    timeout_on(&disk())
+    setting_on(&disk().power)
 }
 
 pub fn set_disk_off(enabled: bool) -> io::Result<()> {
     set_timeout(&disk(), enabled)
+}
+
+// --- Waking the computer -------------------------------------------------------------
+//
+// Wake timers are a value of the active power scheme: 0 = off, 1 = on, 2 = important timers
+// only. Only 1 lets Gravekeeper's own timer through (see `gravekeeper_core::wake`), so the
+// other two both count as off.
+//
+// Wake on LAN is per network adapter and machine-wide. The state is read without elevation:
+// an adapter counts when `powercfg` lists it as armed for wake and its driver does not have
+// magic packets turned off. Changing it goes through the elevated helper, and only touches
+// physical adapters: arming every device, as a blanket `MSPower_DeviceWakeEnable` would, also
+// lets mice and USB hubs wake the computer. Pattern matching is left out by the magic-packet
+// switch, so ordinary traffic does not wake it. `-NoRestart` keeps the network up during the
+// change, so a driver may only apply its part after the next restart.
+
+fn wake_timer_setting() -> PowerSetting {
+    use windows::Win32::System::SystemServices::{GUID_ALLOW_RTC_WAKE, GUID_SLEEP_SUBGROUP};
+    PowerSetting {
+        subgroup: GUID_SLEEP_SUBGROUP,
+        setting: GUID_ALLOW_RTC_WAKE,
+    }
+}
+
+pub fn wake_timers() -> io::Result<bool> {
+    let (ac, dc) = read_setting(&wake_timer_setting())?;
+    Ok(ac == 1 && (dc == 1 || !has_battery()))
+}
+
+pub fn set_wake_timers(enabled: bool) -> io::Result<()> {
+    let value = u32::from(enabled);
+    write_setting(&wake_timer_setting(), value, value)
+}
+
+/// The network adapter class, whose numbered subkeys are the adapters.
+const NET_CLASS_KEY: &str =
+    r"SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}";
+
+/// `armed` is what `powercfg /devicequery wake_armed` printed. It may add an instance suffix
+/// to the driver's description, such as "Adapter #2".
+fn adapter_wakes(description: &str, magic_packet: Option<&str>, armed: &str) -> bool {
+    magic_packet != Some("0") && armed.lines().any(|line| line.starts_with(description))
+}
+
+pub fn wake_for_network() -> io::Result<bool> {
+    let armed = powercfg_output(&["/devicequery", "wake_armed"])?;
+    let class = LOCAL_MACHINE.open(NET_CLASS_KEY).map_err(io::Error::from)?;
+    Ok(class.keys().map_err(io::Error::from)?.any(|name| {
+        // Not every subkey is an adapter, and some are not readable by a standard user.
+        let Ok(adapter) = class.open(name) else {
+            return false;
+        };
+        let Ok(description) = adapter.get_string("DriverDesc") else {
+            return false;
+        };
+        let magic_packet = adapter.get_string("*WakeOnMagicPacket").ok();
+        adapter_wakes(&description, magic_packet.as_deref(), &armed)
+    }))
+}
+
+pub fn set_wake_for_network(enabled: bool) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const SCRIPT: &str = concat!(
+        "$ErrorActionPreference='SilentlyContinue';$done=$false;",
+        "$adapters=Get-NetAdapter -Physical|Where-Object{$_.Status -ne 'Not Present'};",
+        "foreach($a in $adapters){",
+        "$mine={$_.InstanceName.StartsWith($a.PnPDeviceID,'OrdinalIgnoreCase')};",
+        "Set-NetAdapterAdvancedProperty -Name $a.Name -RegistryKeyword '*WakeOnMagicPacket' ",
+        "-RegistryValue $(if($on){'1'}else{'0'}) -NoRestart;",
+        "if($on){Enable-NetAdapterPowerManagement -Name $a.Name -WakeOnMagicPacket -NoRestart;",
+        "Get-CimInstance MSNdis_DeviceWakeOnMagicPacketOnly -Namespace root/WMI|",
+        "Where-Object $mine|Set-CimInstance -Property @{EnableWakeOnMagicPacketOnly=$true}}",
+        "else{Disable-NetAdapterPowerManagement -Name $a.Name -WakeOnMagicPacket -NoRestart}",
+        "foreach($d in Get-CimInstance MSPower_DeviceWakeEnable -Namespace root/WMI|",
+        "Where-Object $mine){$d|Set-CimInstance -Property @{Enable=$on};$done=$true}}",
+        "if(-not $done){exit 1}",
+    );
+    let script = format!("$on=${enabled};{SCRIPT}");
+    let status = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "no network adapter here can be set to wake the computer",
+        ))
+    }
+}
+
+// --- Sign-in and locking -------------------------------------------------------------
+//
+// Asking for sign-in on wake is a value of the active power scheme (`CONSOLELOCK`: 0 = no,
+// 1 = yes). Unlike the timeouts, Windows refuses to let a standard user write it, so it goes
+// through the elevated helper. It is 0 or 1, so there is nothing worth backing up.
+//
+// The lock screen and the inactivity limit are machine-wide policies in HKLM, changed by the
+// elevated helper. `NoLockScreen` counts as on unless it is 1, and turning it on removes the
+// value. `InactivityTimeoutSecs` is off when absent or 0; its previous value is backed up in
+// HKLM, since the helper may run as another account.
+
+const PERSONALIZATION_POLICY_KEY: &str = r"SOFTWARE\Policies\Microsoft\Windows\Personalization";
+const NO_LOCK_SCREEN: &str = "NoLockScreen";
+const SYSTEM_POLICY_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
+const INACTIVITY_TIMEOUT: &str = "InactivityTimeoutSecs";
+const LOCK_BACKUP_KEY: &str = r"SOFTWARE\Gravekeeper\Lock";
+/// Used only when turning the inactivity limit on with nothing backed up.
+const DEFAULT_INACTIVITY_SECS: u32 = 15 * 60;
+
+fn lock_on_wake_setting() -> PowerSetting {
+    use windows::Win32::System::SystemServices::{GUID_LOCK_CONSOLE_ON_WAKE, NO_SUBGROUP_GUID};
+    PowerSetting {
+        subgroup: NO_SUBGROUP_GUID,
+        setting: GUID_LOCK_CONSOLE_ON_WAKE,
+    }
+}
+
+pub fn sign_in_on_wake() -> io::Result<bool> {
+    setting_on(&lock_on_wake_setting())
+}
+
+pub fn set_sign_in_on_wake(enabled: bool) -> io::Result<()> {
+    let value = u32::from(enabled);
+    write_setting(&lock_on_wake_setting(), value, value)
+}
+
+pub fn lock_screen_enabled() -> io::Result<bool> {
+    Ok(read_u32(PERSONALIZATION_POLICY_KEY, NO_LOCK_SCREEN)? != Some(1))
+}
+
+pub fn set_lock_screen(enabled: bool) -> io::Result<()> {
+    let key = LOCAL_MACHINE
+        .create(PERSONALIZATION_POLICY_KEY)
+        .map_err(io::Error::from)?;
+    if enabled {
+        // Already gone is what we want.
+        let _ = key.remove_value(NO_LOCK_SCREEN);
+        Ok(())
+    } else {
+        key.set_u32(NO_LOCK_SCREEN, 1).map_err(io::Error::from)
+    }
+}
+
+pub fn inactivity_lock_enabled() -> io::Result<bool> {
+    Ok(read_u32(SYSTEM_POLICY_KEY, INACTIVITY_TIMEOUT)?.is_some_and(|secs| secs != 0))
+}
+
+pub fn set_inactivity_lock(enabled: bool) -> io::Result<()> {
+    let key = LOCAL_MACHINE
+        .create(SYSTEM_POLICY_KEY)
+        .map_err(io::Error::from)?;
+    let backup = LOCAL_MACHINE
+        .create(LOCK_BACKUP_KEY)
+        .map_err(io::Error::from)?;
+    if enabled {
+        let secs = backup
+            .get_u32(INACTIVITY_TIMEOUT)
+            .ok()
+            .filter(|secs| *secs != 0)
+            .unwrap_or(DEFAULT_INACTIVITY_SECS);
+        key.set_u32(INACTIVITY_TIMEOUT, secs)
+            .map_err(io::Error::from)?;
+        let _ = backup.remove_value(INACTIVITY_TIMEOUT);
+    } else {
+        if let Some(secs) = read_u32(SYSTEM_POLICY_KEY, INACTIVITY_TIMEOUT)?.filter(|s| *s != 0) {
+            backup
+                .set_u32(INACTIVITY_TIMEOUT, secs)
+                .map_err(io::Error::from)?;
+        }
+        key.set_u32(INACTIVITY_TIMEOUT, 0)
+            .map_err(io::Error::from)?;
+    }
+    Ok(())
+}
+
+// --- Screen saver --------------------------------------------------------------------
+//
+// Per user. It runs only if `ScreenSaveActive` is not 0 and one is chosen (`SCRNSAVE.EXE`),
+// so both count; a default Windows has it active with none chosen, which is off. The switch is
+// `SPI_SETSCREENSAVEACTIVE`, which also applies it at once and leaves the choice in place for
+// turning it back on. A group policy under HKCU overrides both, and cannot be changed from
+// here: a standard user may not write there.
+
+const DESKTOP_KEY: &str = r"Control Panel\Desktop";
+const DESKTOP_POLICY_KEY: &str = r"Software\Policies\Microsoft\Windows\Control Panel\Desktop";
+const SCREEN_SAVE_ACTIVE: &str = "ScreenSaveActive";
+const SCREEN_SAVER: &str = "SCRNSAVE.EXE";
+
+fn read_hkcu_string(key_path: &str, value: &str) -> Option<String> {
+    windows_registry::CURRENT_USER
+        .open(key_path)
+        .and_then(|key| key.get_string(value))
+        .ok()
+}
+
+/// The screen saver that would run, whichever way it was chosen.
+fn chosen_screen_saver() -> Option<String> {
+    read_hkcu_string(DESKTOP_POLICY_KEY, SCREEN_SAVER)
+        .or_else(|| read_hkcu_string(DESKTOP_KEY, SCREEN_SAVER))
+        .filter(|path| !path.is_empty())
+}
+
+pub fn screen_saver_enabled() -> io::Result<bool> {
+    let active = read_hkcu_string(DESKTOP_POLICY_KEY, SCREEN_SAVE_ACTIVE)
+        .or_else(|| read_hkcu_string(DESKTOP_KEY, SCREEN_SAVE_ACTIVE));
+    Ok(active.as_deref() != Some("0") && chosen_screen_saver().is_some())
+}
+
+pub fn set_screen_saver(enabled: bool) -> io::Result<()> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_SETSCREENSAVEACTIVE, SPIF_UPDATEINIFILE, SystemParametersInfoW,
+    };
+
+    if read_hkcu_string(DESKTOP_POLICY_KEY, SCREEN_SAVE_ACTIVE).is_some() {
+        return Err(io::Error::other("a group policy controls the screen saver"));
+    }
+    if enabled && chosen_screen_saver().is_none() {
+        return Err(io::Error::other(
+            "no screen saver is chosen; choose one in the Windows screen saver settings",
+        ));
+    }
+    // SAFETY: this action takes its value in the first parameter and uses no buffer.
+    unsafe {
+        SystemParametersInfoW(
+            SPI_SETSCREENSAVEACTIVE,
+            u32::from(enabled),
+            None,
+            SPIF_UPDATEINIFILE,
+        )
+    }
+    .map_err(io::Error::from)
 }
 
 // --- Hibernation ---------------------------------------------------------------------
@@ -1155,5 +1423,20 @@ fn restart_notification_service() -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::other(format!("powershell exited with {status}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_adapter_wakes_when_armed_and_magic_packets_are_on() {
+        let armed = "Some Adapter #11\r\nUSB4 Router\r\n";
+        assert!(adapter_wakes("Some Adapter", Some("1"), armed));
+        // Not every driver has the keyword.
+        assert!(adapter_wakes("Some Adapter", None, armed));
+        assert!(!adapter_wakes("Some Adapter", Some("0"), armed));
+        assert!(!adapter_wakes("Other Adapter", Some("1"), armed));
     }
 }

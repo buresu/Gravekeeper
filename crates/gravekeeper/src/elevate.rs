@@ -48,10 +48,17 @@ pub enum Task {
     DiskOff { enabled: bool },
     /// Turns starting up after a power failure on or off (macOS, machine-wide).
     RestartAfterPowerFailure { enabled: bool },
-    /// Turns waking for network access (Wake on LAN) on or off (macOS, machine-wide).
+    /// Turns waking for network access (Wake on LAN) on or off (Windows and macOS,
+    /// machine-wide).
     WakeForNetwork { enabled: bool },
     /// Turns the Bluetooth Setup Assistant at startup on or off (macOS, machine-wide).
     BluetoothSetupAssistant { enabled: bool },
+    /// Turns asking for sign-in on wake on or off (Windows, power scheme).
+    SignInOnWake { enabled: bool },
+    /// Turns the lock screen on or off (Windows, machine-wide policy).
+    LockScreen { enabled: bool },
+    /// Turns locking after a period of inactivity on or off (Windows, machine-wide policy).
+    InactivityLock { enabled: bool },
     /// Enables or disables hibernation (system-wide; manages hiberfil.sys).
     Hibernate { enabled: bool },
     /// Turns Windows Security (Defender) notifications on or off (machine-wide).
@@ -83,6 +90,9 @@ impl Task {
             Task::BluetoothSetupAssistant { enabled } => {
                 os_settings::set_bluetooth_setup_assistant(enabled)
             }
+            Task::SignInOnWake { enabled } => os_settings::set_sign_in_on_wake(enabled),
+            Task::LockScreen { enabled } => os_settings::set_lock_screen(enabled),
+            Task::InactivityLock { enabled } => os_settings::set_inactivity_lock(enabled),
             Task::Hibernate { enabled } => os_settings::set_hibernate(enabled),
             Task::SecurityNotifications { enabled } => {
                 os_settings::set_security_notifications(enabled)
@@ -105,6 +115,9 @@ impl fmt::Display for Task {
             }
             Task::WakeForNetwork { enabled } => ("waking for network access", enabled),
             Task::BluetoothSetupAssistant { enabled } => ("the Bluetooth Setup Assistant", enabled),
+            Task::SignInOnWake { enabled } => ("requiring sign-in on wake", enabled),
+            Task::LockScreen { enabled } => ("the lock screen", enabled),
+            Task::InactivityLock { enabled } => ("locking when inactive", enabled),
             Task::Hibernate { enabled } => ("hibernation", enabled),
             Task::SecurityNotifications { enabled } => ("Windows Security notifications", enabled),
             Task::Firewall { enabled } => ("the firewall", enabled),
@@ -779,6 +792,9 @@ mod tests {
             Task::RestartAfterPowerFailure { enabled: true },
             Task::WakeForNetwork { enabled: true },
             Task::BluetoothSetupAssistant { enabled: false },
+            Task::SignInOnWake { enabled: false },
+            Task::LockScreen { enabled: false },
+            Task::InactivityLock { enabled: false },
             Task::Hibernate { enabled: false },
             Task::SecurityNotifications { enabled: false },
             Task::Firewall { enabled: false },

@@ -29,8 +29,15 @@ tracing.workspace = true
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# Same version process-wrap uses; for the CREATE_NO_WINDOW flag and the children's error mode.
-windows = { workspace = true, features = ["Win32_System_Diagnostics_Debug"] }
+# Same version process-wrap uses; for the CREATE_NO_WINDOW flag and the children's error mode,
+# and the timer that wakes the computer for a schedule.
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Power",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true
