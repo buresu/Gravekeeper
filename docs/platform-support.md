@@ -26,14 +26,15 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 | Boot time (`boot_delay`, after-boot schedules) | ✅ | ✅ | 🧪 | 🧪 |
 | Log files and rotation | ✅ | ✅ | 🧪 | 🧪 |
 | Administrator rights for OS settings | 🧪 pkexec | 🧪 same | ✅ UAC | 🧪 osascript |
-| Automatic updates on/off | ⚠️ apt / dnf-automatic timers (elevated; untested) | ⚠️ same | ✅ Pro (services + policy); 🧪 Home (services only) | ⏳ |
-| Automatic logon on/off | ⚠️ Plasma Login Manager, GDM (elevated; not yet run through pkexec, GDM untested) | ⚠️ same | 🧪 Winlogon + LSA secret (password via OS prompt) | ⏳ |
-| Automatic sleep on/off | ✅ KDE Plasma 6 (PowerDevil); ⚠️ GNOME (gsettings, untested) | ✅ same | 🧪 power scheme standby timeout (no elevation) | ⏳ |
-| Turn off display on/off | ✅ KDE Plasma 6 (PowerDevil); ⚠️ GNOME (gsettings, untested) | ✅ same | 🧪 power scheme video timeout (no elevation) | ⏳ |
-| Hibernation on/off | ⚠️ systemd `sleep.conf.d` drop-in (elevated; not yet run through pkexec) | ⚠️ same | 🧪 `powercfg /hibernate` (elevated) | ⏳ |
-| Notifications on/off | ✅ KDE Plasma 6 (Do not disturb); ⚠️ GNOME (`show-banners`, untested) | ✅ same | 🧪 per-user toast switch (no elevation) | ⏳ |
-| Windows Security notifications on/off | — | — | 🧪 Defender per-category (HKLM elevated + HKCU account protection) | ⏳ |
-| Firewall on/off | ⚠️ ufw or firewalld (elevated; untested) | ⚠️ same | 🧪 `Set-NetFirewallProfile -Enabled` (elevated) | ⏳ |
+| Automatic updates on/off | ⚠️ apt / dnf-automatic timers (elevated; untested) | ⚠️ same | ✅ Pro (services + policy); 🧪 Home (services only) | ⚠️ Software Update preferences (elevated; reading verified, change untested) |
+| Automatic logon on/off | ⚠️ Plasma Login Manager, GDM (elevated; not yet run through pkexec, GDM untested) | ⚠️ same | 🧪 Winlogon + LSA secret (password via OS prompt) | ⚠️ `autoLoginUser` + `/etc/kcpassword` (elevated, password via dialog and checked with PAM; reading verified, change untested; not with FileVault) |
+| Automatic sleep on/off | ✅ KDE Plasma 6 (PowerDevil); ⚠️ GNOME (gsettings, untested) | ✅ same | 🧪 power scheme standby timeout (no elevation) | ⚠️ `pmset sleep` (elevated; reading verified, change untested) |
+| Turn off display on/off | ✅ KDE Plasma 6 (PowerDevil); ⚠️ GNOME (gsettings, untested) | ✅ same | 🧪 power scheme video timeout (no elevation) | ⚠️ `pmset displaysleep` (elevated; reading verified, change untested) |
+| Hibernation on/off | ⚠️ systemd `sleep.conf.d` drop-in (elevated; not yet run through pkexec) | ⚠️ same | 🧪 `powercfg /hibernate` (elevated) | ⚠️ `pmset hibernatemode` (elevated; untested; unavailable on desktops with Apple silicon) |
+| Notifications on/off | ✅ KDE Plasma 6 (Do not disturb); ⚠️ GNOME (`show-banners`, untested) | ✅ same | 🧪 per-user toast switch (no elevation) | — (Focus has no interface for other apps) |
+| Windows Security notifications on/off | — | — | 🧪 Defender per-category (HKLM elevated + HKCU account protection) | — |
+| Firewall on/off | ⚠️ ufw or firewalld (elevated; untested) | ⚠️ same | 🧪 `Set-NetFirewallProfile -Enabled` (elevated) | ⚠️ application firewall, `socketfilterfw` (elevated; reading verified, change untested) |
+| App Nap on/off | — | — | — | ✅ `NSAppSleepDisabled` (no elevation) |
 
 ## Limitations and notes
 
@@ -88,3 +89,11 @@ Legend: ✅ tested on a real machine / 🧪 built and tested in CI only / ⏳ no
 - **Tray**: must be created on the main thread after the event loop starts, so it is created inside eframe's app-creation callback.
 - **Gatekeeper**: signing and notarization of release builds are handled in Phase 3.
 - **Disks**: of the system volume's helper mounts under `/System/Volumes/`, only `/System/Volumes/Data` is monitored.
+- **System settings**: unlike Windows and Linux, the power settings are machine-wide on macOS (System Settings asks for an administrator to change them), so automatic sleep and turning off the display ask for administrator rights too. Values replaced by turning a setting off are recorded in `/Library/Application Support/Gravekeeper/os-settings-backup.json` (written by the elevated helper) and restored when it is turned on again. Settings pushed by a configuration profile (MDM) override these and are not shown.
+- **Automatic sleep** and **turning off the display**: `pmset`'s `sleep` and `displaysleep` for each power source the Mac has (AC, battery, UPS), set to 0 (never). With nothing recorded, turning them on sets 30 / 15 minutes of system sleep (AC / battery) and the macOS defaults of 10 / 2 minutes for the display.
+- **Hibernation**: `pmset hibernatemode` 0 (sleep only) for each power source, and the sleep image `/var/vm/sleepimage` is deleted; turning it on restores the recorded mode, else 3 (the laptop default). Desktops with Apple silicon do not hibernate, and the setting shows as unavailable.
+- **Automatic updates**: the five switches under Software Update > Automatic Updates in `/Library/Preferences/com.apple.SoftwareUpdate` (`AutomaticCheckEnabled`, `AutomaticDownload`, `AutomaticallyInstallMacOSUpdates`, `CriticalUpdateInstall`, `ConfigDataInstall`) are all turned off; turning updates on restores the recorded values, or with no record removes the keys so the macOS defaults apply. App Store app updates are not changed.
+- **Automatic logon**: `autoLoginUser` in `/Library/Preferences/com.apple.loginwindow` and the password in `/etc/kcpassword` (readable by root only), as System Settings writes them. That file is only obfuscated with a fixed key, not encrypted, which is how macOS itself stores it. The account is the one signed in at the screen; the elevated helper asks for its password in a dialog and checks it through PAM (`checkpw`) before saving. macOS does not sign in automatically while FileVault is on, so the setting then shows as unavailable.
+- **Firewall**: the application firewall (System Settings > Network > Firewall), through `socketfilterfw --setglobalstate`. The packet filter (`pf`) is not changed.
+- **Notifications**: Focus (Do Not Disturb) has no interface other apps can use since macOS 12, so the setting shows as unavailable.
+- **App Nap**: turning it off sets `NSAppSleepDisabled` in the user's global preferences, which every app reads at launch, so it applies to apps started afterwards (restart supervised applications for it to take effect). Turning it on removes the key. No administrator rights are needed.

@@ -1097,6 +1097,16 @@ pub fn set_security_notifications_user(_enabled: bool) -> io::Result<()> {
     Err(unsupported())
 }
 
+// --- macOS only ------------------------------------------------------------------------
+
+pub fn app_nap_enabled() -> io::Result<bool> {
+    Err(unsupported())
+}
+
+pub fn set_app_nap(_enabled: bool) -> io::Result<()> {
+    Err(unsupported())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1136,3 +1136,17 @@ fn restart_notification_service() -> io::Result<()> {
         Err(io::Error::other(format!("powershell exited with {status}")))
     }
 }
+
+// --- macOS only ----------------------------------------------------------------------
+
+fn only_on_macos() -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "only on macOS")
+}
+
+pub fn app_nap_enabled() -> io::Result<bool> {
+    Err(only_on_macos())
+}
+
+pub fn set_app_nap(_enabled: bool) -> io::Result<()> {
+    Err(only_on_macos())
+}

@@ -36,8 +36,14 @@ pub enum Task {
     AutomaticUpdates { enabled: bool },
     /// Turns automatic logon on or off. No password or account travels in the request: on
     /// Windows the elevated helper collects them through the OS credential prompt; on Linux
-    /// it signs in pkexec's caller and needs no password (see `os_settings`).
+    /// it signs in pkexec's caller and needs no password; on macOS it signs in the user at the
+    /// screen and asks for their password in a dialog (see `os_settings`).
     AutoLogin { enabled: bool },
+    /// Turns automatic sleep on or off. Only where it is machine-wide (macOS, see
+    /// [`os_settings::POWER_NEEDS_ADMIN`]); elsewhere it is per-user and refused here.
+    AutomaticSleep { enabled: bool },
+    /// Turns the display-off timeout on or off. Only where it is machine-wide, as above.
+    DisplayOff { enabled: bool },
     /// Enables or disables hibernation (system-wide; manages hiberfil.sys).
     Hibernate { enabled: bool },
     /// Turns Windows Security (Defender) notifications on or off (machine-wide).
@@ -51,6 +57,16 @@ impl Task {
         match *self {
             Task::AutomaticUpdates { enabled } => os_settings::set_automatic_updates(enabled),
             Task::AutoLogin { enabled } => os_settings::set_auto_login(enabled),
+            Task::AutomaticSleep { .. } | Task::DisplayOff { .. }
+                if !os_settings::POWER_NEEDS_ADMIN =>
+            {
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "a per-user setting, not changed with administrator rights",
+                ))
+            }
+            Task::AutomaticSleep { enabled } => os_settings::set_automatic_sleep(enabled),
+            Task::DisplayOff { enabled } => os_settings::set_display_off(enabled),
             Task::Hibernate { enabled } => os_settings::set_hibernate(enabled),
             Task::SecurityNotifications { enabled } => {
                 os_settings::set_security_notifications(enabled)
@@ -65,6 +81,8 @@ impl fmt::Display for Task {
         let (what, enabled) = match self {
             Task::AutomaticUpdates { enabled } => ("automatic updates", enabled),
             Task::AutoLogin { enabled } => ("automatic logon", enabled),
+            Task::AutomaticSleep { enabled } => ("automatic sleep", enabled),
+            Task::DisplayOff { enabled } => ("the display-off timeout", enabled),
             Task::Hibernate { enabled } => ("hibernation", enabled),
             Task::SecurityNotifications { enabled } => ("Windows Security notifications", enabled),
             Task::Firewall { enabled } => ("the firewall", enabled),
@@ -733,6 +751,8 @@ mod tests {
             Task::AutomaticUpdates { enabled: false },
             Task::AutomaticUpdates { enabled: true },
             Task::AutoLogin { enabled: true },
+            Task::AutomaticSleep { enabled: false },
+            Task::DisplayOff { enabled: true },
             Task::Hibernate { enabled: false },
             Task::SecurityNotifications { enabled: false },
             Task::Firewall { enabled: false },
@@ -748,6 +768,15 @@ mod tests {
         assert_eq!(json, r#"{"task":"automatic-updates","enabled":false}"#);
         let json = serde_json::to_string(&Task::AutoLogin { enabled: true }).unwrap();
         assert_eq!(json, r#"{"task":"auto-login","enabled":true}"#);
+        let json = serde_json::to_string(&Task::DisplayOff { enabled: false }).unwrap();
+        assert_eq!(json, r#"{"task":"display-off","enabled":false}"#);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn per_user_power_settings_are_refused() {
+        let err = apply(&[Task::AutomaticSleep { enabled: false }]).unwrap_err();
+        assert!(err.contains("per-user"), "{err}");
     }
 
     #[test]
