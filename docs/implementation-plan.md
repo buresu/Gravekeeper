@@ -147,6 +147,7 @@ Requested before Phase 4: native file dialogs and a less dated look.
   - [x] Firewall on/off (Windows; elevated, all profiles. Linux: ufw or firewalld, elevated. macOS: application firewall, elevated)
   - [x] Power: automatic sleep on/off (Windows; no elevation, per-user power scheme. Linux: KDE PowerDevil, GNOME gsettings)
   - [x] Power: turn off the display on/off (Windows; no elevation. Linux: KDE PowerDevil, GNOME gsettings)
+  - [x] Power: turn off hard disks on/off (Windows; no elevation)
   - [x] Power: hibernation on/off (Windows; elevated, `powercfg /hibernate`. Linux: elevated, systemd `sleep.conf.d` drop-in)
   - [x] Power: macOS sleep, display and hibernation settings (elevated, `pmset`)
   - [x] App Nap on/off (macOS; per-user `NSAppSleepDisabled`, no elevation)

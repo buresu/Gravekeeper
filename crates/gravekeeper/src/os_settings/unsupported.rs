@@ -41,6 +41,14 @@ pub fn set_display_off(_enabled: bool) -> io::Result<()> {
     Err(unsupported())
 }
 
+pub fn disk_off() -> io::Result<bool> {
+    Err(unsupported())
+}
+
+pub fn set_disk_off(_enabled: bool) -> io::Result<()> {
+    Err(unsupported())
+}
+
 pub fn hibernate_enabled() -> io::Result<bool> {
     Err(unsupported())
 }

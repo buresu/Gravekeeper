@@ -21,6 +21,8 @@ pub struct SystemView {
     automatic_sleep: Option<Result<bool, String>>,
     /// Whether the display turns off on its own. Changed like `automatic_sleep`.
     display_off: Option<Result<bool, String>>,
+    /// Whether hard disks turn off on their own (Windows). Changed in-process (no elevation).
+    disk_off: Option<Result<bool, String>>,
     /// Whether hibernation is enabled. Changed through `elevate`.
     hibernate: Option<Result<bool, String>>,
     /// Whether notifications are shown. Changed in-process (no elevation).
@@ -60,6 +62,7 @@ impl SystemView {
         self.auto_login = None;
         self.automatic_sleep = None;
         self.display_off = None;
+        self.disk_off = None;
         self.hibernate = None;
         self.notifications = None;
         self.security_notifications = None;
@@ -186,6 +189,24 @@ impl SystemView {
                             }
                         },
                     );
+                    if cfg!(windows) {
+                        form::row(
+                            ui,
+                            "Turn off hard disks",
+                            Some("When off, hard disks never turn off on their own. Needs no administrator rights."),
+                            |ui| {
+                                let cached = &mut self.disk_off;
+                                direct_toggle(
+                                    ui,
+                                    busy,
+                                    cached,
+                                    os_settings::disk_off,
+                                    os_settings::set_disk_off,
+                                    &mut self.error,
+                                );
+                            },
+                        );
+                    }
                     let hibernation_help = per_os(
                         "When off, the computer cannot hibernate and hiberfil.sys is freed. Asks for administrator rights.",
                         "When off, the computer cannot hibernate, including suspend-then-hibernate and hybrid sleep. Asks for administrator rights.",

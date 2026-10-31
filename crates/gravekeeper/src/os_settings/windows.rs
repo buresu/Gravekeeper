@@ -693,7 +693,7 @@ fn lsa_store_password(password: Option<&[u16]>) -> io::Result<()> {
     }
 }
 
-// --- Power timeouts (sleep, display off) ---------------------------------------------
+// --- Power timeouts (sleep, display off, disk off) -----------------------------------
 //
 // Each is a timeout on the active power scheme, in seconds, where 0 means "never". A
 // standard user may change their own power timeouts, so these need no elevation. The
@@ -712,17 +712,19 @@ const DEFAULT_AC_SECS: u32 = 30 * 60;
 const DEFAULT_DC_SECS: u32 = 15 * 60;
 const POWER_BACKUP_KEY: &str = r"SOFTWARE\Gravekeeper\Power";
 
-/// A power timeout: the GUID it is read and written by, and the HKCU value names its
+/// A power timeout: the GUIDs it is read and written by, and the HKCU value names its
 /// backup uses.
 struct Timeout {
+    subgroup: GUID,
     setting: GUID,
     ac_backup: &'static str,
     dc_backup: &'static str,
 }
 
 fn standby() -> Timeout {
-    use windows::Win32::System::SystemServices::GUID_STANDBY_TIMEOUT;
+    use windows::Win32::System::SystemServices::{GUID_SLEEP_SUBGROUP, GUID_STANDBY_TIMEOUT};
     Timeout {
+        subgroup: GUID_SLEEP_SUBGROUP,
         setting: GUID_STANDBY_TIMEOUT,
         ac_backup: "StandbyAc",
         dc_backup: "StandbyDc",
@@ -730,11 +732,24 @@ fn standby() -> Timeout {
 }
 
 fn display() -> Timeout {
-    use windows::Win32::System::SystemServices::GUID_VIDEO_POWERDOWN_TIMEOUT;
+    use windows::Win32::System::SystemServices::{
+        GUID_VIDEO_POWERDOWN_TIMEOUT, GUID_VIDEO_SUBGROUP,
+    };
     Timeout {
+        subgroup: GUID_VIDEO_SUBGROUP,
         setting: GUID_VIDEO_POWERDOWN_TIMEOUT,
         ac_backup: "VideoAc",
         dc_backup: "VideoDc",
+    }
+}
+
+fn disk() -> Timeout {
+    use windows::Win32::System::SystemServices::{GUID_DISK_POWERDOWN_TIMEOUT, GUID_DISK_SUBGROUP};
+    Timeout {
+        subgroup: GUID_DISK_SUBGROUP,
+        setting: GUID_DISK_POWERDOWN_TIMEOUT,
+        ac_backup: "DiskAc",
+        dc_backup: "DiskDc",
     }
 }
 
@@ -758,11 +773,8 @@ fn active_scheme() -> io::Result<GUID> {
 
 fn read_timeout(timeout: &Timeout) -> io::Result<(u32, u32)> {
     use windows::Win32::System::Power::{PowerReadACValueIndex, PowerReadDCValueIndex};
-    use windows::Win32::System::SystemServices::GUID_SLEEP_SUBGROUP;
-    use windows::Win32::System::SystemServices::GUID_VIDEO_SUBGROUP;
 
     let scheme = active_scheme()?;
-    let subgroup = subgroup_of(&timeout.setting, &GUID_SLEEP_SUBGROUP, &GUID_VIDEO_SUBGROUP);
     let mut ac = 0u32;
     let mut dc = 0u32;
     // SAFETY: all GUID pointers and the scheme outlive the calls.
@@ -770,14 +782,14 @@ fn read_timeout(timeout: &Timeout) -> io::Result<(u32, u32)> {
         let _ = PowerReadACValueIndex(
             None,
             Some(&scheme),
-            Some(&subgroup),
+            Some(&timeout.subgroup),
             Some(&timeout.setting),
             &mut ac,
         );
         let _ = PowerReadDCValueIndex(
             None,
             Some(&scheme),
-            Some(&subgroup),
+            Some(&timeout.subgroup),
             Some(&timeout.setting),
             &mut dc,
         );
@@ -790,20 +802,30 @@ fn write_timeout(timeout: &Timeout, ac: u32, dc: u32) -> io::Result<()> {
     use windows::Win32::System::Power::{
         PowerSetActiveScheme, PowerWriteACValueIndex, PowerWriteDCValueIndex,
     };
-    use windows::Win32::System::SystemServices::{GUID_SLEEP_SUBGROUP, GUID_VIDEO_SUBGROUP};
 
     let scheme = active_scheme()?;
-    let subgroup = subgroup_of(&timeout.setting, &GUID_SLEEP_SUBGROUP, &GUID_VIDEO_SUBGROUP);
     // SAFETY: the scheme and GUIDs outlive the calls.
     let err = unsafe {
-        PowerWriteACValueIndex(None, &scheme, Some(&subgroup), Some(&timeout.setting), ac)
+        PowerWriteACValueIndex(
+            None,
+            &scheme,
+            Some(&timeout.subgroup),
+            Some(&timeout.setting),
+            ac,
+        )
     };
     if err != ERROR_SUCCESS {
         return Err(io::Error::from_raw_os_error(err.0 as i32));
     }
     // SAFETY: as above.
     unsafe {
-        let _ = PowerWriteDCValueIndex(None, &scheme, Some(&subgroup), Some(&timeout.setting), dc);
+        let _ = PowerWriteDCValueIndex(
+            None,
+            &scheme,
+            Some(&timeout.subgroup),
+            Some(&timeout.setting),
+            dc,
+        );
     }
     // Re-selecting the active scheme applies the writes and makes the Settings app refresh.
     // SAFETY: `scheme` is the active scheme's own GUID.
@@ -828,15 +850,6 @@ fn run_powercfg(args: &[&str]) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::other(format!("powercfg exited with {status}")))
-    }
-}
-
-fn subgroup_of(setting: &GUID, sleep: &GUID, video: &GUID) -> GUID {
-    use windows::Win32::System::SystemServices::GUID_STANDBY_TIMEOUT;
-    if *setting == GUID_STANDBY_TIMEOUT {
-        *sleep
-    } else {
-        *video
     }
 }
 
@@ -910,6 +923,14 @@ pub fn display_off() -> io::Result<bool> {
 
 pub fn set_display_off(enabled: bool) -> io::Result<()> {
     set_timeout(&display(), enabled)
+}
+
+pub fn disk_off() -> io::Result<bool> {
+    timeout_on(&disk())
+}
+
+pub fn set_disk_off(enabled: bool) -> io::Result<()> {
+    set_timeout(&disk(), enabled)
 }
 
 // --- Hibernation ---------------------------------------------------------------------

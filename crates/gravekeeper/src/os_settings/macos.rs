@@ -746,6 +746,14 @@ pub fn set_notifications(_enabled: bool) -> io::Result<()> {
     ))
 }
 
+pub fn disk_off() -> io::Result<bool> {
+    Err(unsupported("only on Windows"))
+}
+
+pub fn set_disk_off(_enabled: bool) -> io::Result<()> {
+    Err(unsupported("only on Windows"))
+}
+
 pub fn security_notifications_enabled() -> io::Result<bool> {
     Err(unsupported("only on Windows"))
 }

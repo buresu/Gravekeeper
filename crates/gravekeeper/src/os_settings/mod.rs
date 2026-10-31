@@ -49,6 +49,16 @@ pub fn set_display_off(enabled: bool) -> io::Result<()> {
     imp::set_display_off(enabled)
 }
 
+/// Whether hard disks turn off on their own after a period of inactivity. Only on Windows.
+pub fn disk_off() -> io::Result<bool> {
+    imp::disk_off()
+}
+
+/// Turns the disk-off timeout on or off. Needs no administrator rights.
+pub fn set_disk_off(enabled: bool) -> io::Result<()> {
+    imp::set_disk_off(enabled)
+}
+
 /// Whether hibernation is enabled on this computer.
 pub fn hibernate_enabled() -> io::Result<bool> {
     imp::hibernate_enabled()
