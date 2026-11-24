@@ -25,10 +25,10 @@ const DISABLE_UX_ACCESS: &str = "SetDisableUXWUAccess";
 /// `WaaSMedicSvc` = manual/3). `BITS` is left out because other software shares it.
 ///
 /// `WaaSMedicSvc` (the update "medic") is the service that revives `wuauserv`, so it is
-/// included rather than fought with file tricks: its security descriptor grants stop and
-/// config to administrators (verified on Windows 11 Home), so it can be disabled and
-/// restored cleanly. Where a build locks it to SYSTEM/TrustedInstaller the best-effort
-/// changes simply fail and the other two still apply (see docs/platform-support.md).
+/// included rather than fought with file tricks. It is a protected (PPL) service, so the
+/// SCM will not reconfigure or stop it for an administrator; its `Start` is written to the
+/// registry instead and takes effect at the next boot (see `set_service_start` and
+/// docs/platform-support.md).
 const SERVICES: &[(&str, u32)] = &[("wuauserv", 3), ("UsoSvc", 2), ("WaaSMedicSvc", 3)];
 const SERVICE_BASE: &str = r"SYSTEM\CurrentControlSet\Services";
 const START: &str = "Start";
@@ -61,14 +61,148 @@ fn service_start(name: &str) -> io::Result<Option<u32>> {
     read_u32(&format!(r"{SERVICE_BASE}\{name}"), START)
 }
 
+/// Sets a service's start type through the Service Control Manager.
+///
+/// It must not be a plain registry write: the SCM reads `Start` only at boot and keeps
+/// its own copy, so a value written behind its back changes what `sc qc` and the
+/// Services console show but not what the SCM does. A service "disabled" that way is
+/// still started on demand by the update tasks, Defender's signature updates or COM
+/// until the next reboot (seen on Windows 11 Home 26H2: `wuauserv` and `UsoSvc` were
+/// running again seconds after being "disabled"). `ChangeServiceConfigW` updates both.
+///
+/// The SCM refuses to reconfigure a protected (PPL) service such as `WaaSMedicSvc`
+/// even to administrators; for that one the registry write is the only way, and it
+/// takes effect at the next boot. Not for the worker services, though: a registry-only
+/// write there would bring back exactly the silent failure described above, so a refusal
+/// is reported instead.
 fn set_service_start(name: &str, value: u32) -> io::Result<()> {
-    LOCAL_MACHINE
-        .options()
-        .read()
-        .write()
-        .open(format!(r"{SERVICE_BASE}\{name}"))
-        .and_then(|key| key.set_u32(START, value))
-        .map_err(io::Error::from)
+    let result = match change_start_type(name, value) {
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied && !WORKERS.contains(&name) => {
+            LOCAL_MACHINE
+                .options()
+                .read()
+                .write()
+                .open(format!(r"{SERVICE_BASE}\{name}"))
+                .and_then(|key| key.set_u32(START, value))
+                .map_err(io::Error::from)
+        }
+        other => other,
+    };
+    // Name the service, so a failure says which one refused.
+    result.map_err(|err| io::Error::new(err.kind(), format!("{name}: {err}")))
+}
+
+fn change_start_type(name: &str, value: u32) -> io::Result<()> {
+    use windows::Win32::System::Services::{
+        ChangeServiceConfigW, ENUM_SERVICE_TYPE, SERVICE_CHANGE_CONFIG, SERVICE_ERROR,
+        SERVICE_NO_CHANGE, SERVICE_START_TYPE,
+    };
+    use windows::core::PCWSTR;
+
+    let service = open_service(name, SERVICE_CHANGE_CONFIG)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{name} not installed")))?;
+    // SAFETY: the handle is open with SERVICE_CHANGE_CONFIG; SERVICE_NO_CHANGE and null
+    // strings leave everything but the start type as it is.
+    unsafe {
+        ChangeServiceConfigW(
+            service.handle(),
+            ENUM_SERVICE_TYPE(SERVICE_NO_CHANGE),
+            SERVICE_START_TYPE(value),
+            SERVICE_ERROR(SERVICE_NO_CHANGE),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            None,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            PCWSTR::null(),
+        )
+    }
+    .map_err(win32_error)
+}
+
+/// Converts a `windows` error to an `io::Error` carrying the plain Win32 code.
+///
+/// `windows` errors hold an HRESULT, and its own conversion keeps that HRESULT as the OS
+/// error (`ERROR_ACCESS_DENIED` becomes -2147024891, `0x80070005`), so `kind()` is not
+/// `PermissionDenied` and comparisons with `ERROR_*` codes never match. An HRESULT that
+/// wraps a Win32 error (`0x8007xxxx`) is unwrapped here.
+fn win32_error(err: windows::core::Error) -> io::Error {
+    let hresult = err.code().0 as u32;
+    if hresult & 0xFFFF_0000 == 0x8007_0000 {
+        io::Error::from_raw_os_error((hresult & 0xFFFF) as i32)
+    } else {
+        io::Error::from(err)
+    }
+}
+
+/// The Win32 error code inside a `windows` error.
+fn os_code(err: &windows::core::Error) -> i32 {
+    win32_error(err.clone()).raw_os_error().unwrap_or(-1)
+}
+
+/// An open service and the SCM connection it came from, both closed when dropped.
+struct Service {
+    service: windows::Win32::System::Services::SC_HANDLE,
+    scm: windows::Win32::System::Services::SC_HANDLE,
+}
+
+impl Service {
+    fn handle(&self) -> windows::Win32::System::Services::SC_HANDLE {
+        self.service
+    }
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        use windows::Win32::System::Services::CloseServiceHandle;
+        // SAFETY: both handles were opened by `open_service` and are closed only here.
+        unsafe {
+            let _ = CloseServiceHandle(self.service);
+            let _ = CloseServiceHandle(self.scm);
+        }
+    }
+}
+
+/// Opens a service with `access`; `Ok(None)` when it is not installed.
+fn open_service(name: &str, access: u32) -> io::Result<Option<Service>> {
+    use windows::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST;
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT,
+    };
+    use windows::core::{HSTRING, PCWSTR};
+
+    // SAFETY: the SCM handle is closed on the error paths and otherwise owned by `Service`.
+    unsafe {
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
+            .map_err(win32_error)?;
+        match OpenServiceW(scm, &HSTRING::from(name), access) {
+            Ok(service) => Ok(Some(Service { service, scm })),
+            Err(err) => {
+                let _ = CloseServiceHandle(scm);
+                if os_code(&err) == ERROR_SERVICE_DOES_NOT_EXIST.0 as i32 {
+                    Ok(None)
+                } else {
+                    Err(win32_error(err))
+                }
+            }
+        }
+    }
+}
+
+/// Whether a service is running (or starting). A standard user may ask this.
+fn service_running(name: &str) -> io::Result<bool> {
+    use windows::Win32::System::Services::{
+        QueryServiceStatus, SERVICE_QUERY_STATUS, SERVICE_STATUS, SERVICE_STOPPED,
+    };
+
+    let Some(service) = open_service(name, SERVICE_QUERY_STATUS)? else {
+        return Ok(false);
+    };
+    let mut status = SERVICE_STATUS::default();
+    // SAFETY: the handle is open with SERVICE_QUERY_STATUS; `status` outlives the call.
+    unsafe { QueryServiceStatus(service.handle(), &mut status) }.map_err(win32_error)?;
+    Ok(status.dwCurrentState != SERVICE_STOPPED)
 }
 
 /// Starts or stops a service now, so the change does not wait for the next boot. The
@@ -83,49 +217,34 @@ fn set_service_start(name: &str, value: u32) -> io::Result<()> {
 fn set_service_running(name: &str, running: bool) -> io::Result<()> {
     use std::time::Duration;
 
-    use windows::Win32::Foundation::{
-        ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_NOT_ACTIVE,
-    };
+    use windows::Win32::Foundation::{ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_NOT_ACTIVE};
     use windows::Win32::System::Services::{
-        CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW, QueryServiceStatus,
-        SC_MANAGER_CONNECT, SERVICE_CONTROL_STOP, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
-        SERVICE_START, SERVICE_STATUS, SERVICE_STOP, SERVICE_STOPPED, StartServiceW,
+        ControlService, QueryServiceStatus, SERVICE_CONTROL_STOP, SERVICE_QUERY_STATUS,
+        SERVICE_RUNNING, SERVICE_START, SERVICE_STATUS, SERVICE_STOP, SERVICE_STOPPED,
+        StartServiceW,
     };
-    use windows::core::{HSTRING, PCWSTR};
 
-    fn code(err: &windows::core::Error) -> i32 {
-        io::Error::from(err.clone()).raw_os_error().unwrap_or(-1)
-    }
+    let access = SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS;
+    let Some(opened) = open_service(name, access)? else {
+        return Ok(());
+    };
+    let service = opened.handle();
 
-    // SAFETY: both handles are closed on every path; the status buffer outlives each call.
+    // SAFETY: the handle stays open until this function returns; the status buffer
+    // outlives each call.
     unsafe {
-        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
-            .map_err(io::Error::from)?;
-        let access = SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS;
-        let service = match OpenServiceW(scm, &HSTRING::from(name), access) {
-            Ok(service) => service,
-            Err(err) => {
-                let _ = CloseServiceHandle(scm);
-                return if code(&err) == ERROR_SERVICE_DOES_NOT_EXIST.0 as i32 {
-                    Ok(())
-                } else {
-                    Err(io::Error::from(err))
-                };
-            }
-        };
-
         let mut status = SERVICE_STATUS::default();
         let outcome = if running {
             match StartServiceW(service, None) {
                 Ok(()) => Ok(()),
-                Err(err) if code(&err) == ERROR_SERVICE_ALREADY_RUNNING.0 as i32 => Ok(()),
-                Err(err) => Err(io::Error::from(err)),
+                Err(err) if os_code(&err) == ERROR_SERVICE_ALREADY_RUNNING.0 as i32 => Ok(()),
+                Err(err) => Err(win32_error(err)),
             }
         } else {
             match ControlService(service, SERVICE_CONTROL_STOP, &mut status) {
                 Ok(()) => Ok(()),
-                Err(err) if code(&err) == ERROR_SERVICE_NOT_ACTIVE.0 as i32 => Ok(()),
-                Err(err) => Err(io::Error::from(err)),
+                Err(err) if os_code(&err) == ERROR_SERVICE_NOT_ACTIVE.0 as i32 => Ok(()),
+                Err(err) => Err(win32_error(err)),
             }
         };
 
@@ -145,9 +264,6 @@ fn set_service_running(name: &str, running: bool) -> io::Result<()> {
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
-
-        let _ = CloseServiceHandle(service);
-        let _ = CloseServiceHandle(scm);
         outcome
     }
 }
@@ -279,16 +395,35 @@ const ENABLE_TASKS: &str = concat!(
     "Remove-ItemProperty -Path $b -Name DisabledTasks",
 );
 
+/// The services that actually scan for, download and install updates. One of them running
+/// means updates are not off, whatever `Start` says. `WaaSMedicSvc` is left out: it is
+/// protected, so it may legitimately keep running until the next boot after being disabled.
+const WORKERS: &[&str] = &["wuauserv", "UsoSvc"];
+
+/// The worker services running although `Start` says disabled: either the SCM never took
+/// the change in (a registry-only write, as older versions did, see `set_service_start`)
+/// or stopping them was refused. Either way updates still run until the next boot.
+fn workers_still_running() -> io::Result<Vec<&'static str>> {
+    let mut running = Vec::new();
+    for name in WORKERS {
+        if service_running(name)? {
+            running.push(*name);
+        }
+    }
+    Ok(running)
+}
+
 pub fn automatic_updates() -> io::Result<bool> {
     if policies_honored()? && policy_disabled()? {
         return Ok(false);
     }
+    let mut disabled = false;
     for (name, _) in SERVICES {
         if service_start(name)? == Some(DISABLED) {
-            return Ok(false);
+            disabled = true;
         }
     }
-    Ok(true)
+    Ok(!disabled || !workers_still_running()?.is_empty())
 }
 
 pub fn set_automatic_updates(enabled: bool) -> io::Result<()> {
@@ -308,16 +443,19 @@ pub fn set_automatic_updates(enabled: bool) -> io::Result<()> {
         // Re-enable the scheduled tasks we disabled (best-effort).
         let _ = set_update_tasks(false);
     } else {
+        // Disable every service before stopping any, so none can start another in between.
         for (name, _) in SERVICES {
             if let Some(current) = service_start(name)? {
                 if current != DISABLED {
                     save_backup(name, current)?;
                 }
                 set_service_start(name, DISABLED)?;
-                // `Start` only governs the next boot, so stop the running instance too
-                // (best-effort; see set_service_running).
-                let _ = set_service_running(name, false);
             }
+        }
+        // The start type only stops new starts, so stop the running instances too
+        // (best-effort; see set_service_running).
+        for (name, _) in SERVICES {
+            let _ = set_service_running(name, false);
         }
         // An extra, edition-aware signal; the services above do the actual work.
         if policies_honored()? {
@@ -326,6 +464,16 @@ pub fn set_automatic_updates(enabled: bool) -> io::Result<()> {
         // The update "medic" can re-start wuauserv; disabling its and the orchestrator's
         // scheduled tasks keeps updates from creeping back (best-effort).
         let _ = set_update_tasks(true);
+
+        // Say so rather than report success while updates still run.
+        let running = workers_still_running()?;
+        if !running.is_empty() {
+            return Err(io::Error::other(format!(
+                "disabled, but {} could not be stopped and will keep running until \
+                 Windows restarts",
+                running.join(" and ")
+            )));
+        }
     }
     Ok(())
 }
@@ -1429,6 +1577,20 @@ fn restart_notification_service() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn win32_errors_are_unwrapped_from_their_hresult() {
+        use windows::Win32::Foundation::{E_FAIL, ERROR_ACCESS_DENIED};
+
+        let denied = windows::core::Error::from(ERROR_ACCESS_DENIED.to_hresult());
+        let err = win32_error(denied.clone());
+        assert_eq!(err.raw_os_error(), Some(5));
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(os_code(&denied), ERROR_ACCESS_DENIED.0 as i32);
+        // Not a wrapped Win32 error: left as it is.
+        let other = win32_error(windows::core::Error::from(E_FAIL));
+        assert_eq!(other.raw_os_error(), Some(E_FAIL.0));
+    }
 
     #[test]
     fn an_adapter_wakes_when_armed_and_magic_packets_are_on() {
