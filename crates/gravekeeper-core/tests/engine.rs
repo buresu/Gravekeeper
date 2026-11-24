@@ -373,7 +373,7 @@ fn shutdown_stops_running_apps() {
         .unwrap();
 
     core.shutdown();
-    let mut system = sysinfo::System::new();
+    let mut system = sysinfo::System::new().expect("sysinfo supports this platform");
     let pid = sysinfo::Pid::from_u32(pid);
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
     assert!(

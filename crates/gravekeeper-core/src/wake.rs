@@ -126,7 +126,7 @@ mod imp {
 pub(crate) fn describe(err: &io::Error, at: SystemTime) -> String {
     let at = jiff::Timestamp::try_from(at)
         .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
+            t.to_zoned_datetime(jiff::tz::TimeZone::system())
                 .strftime("%Y-%m-%d %H:%M")
                 .to_string()
         })

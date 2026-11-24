@@ -14,17 +14,17 @@ gravekeeper-core = { path = "crates/gravekeeper-core", default-features = false 
 
 eframe = { version = "0.37", default-features = false }
 egui_extras = { version = "0.37", default-features = false }
-jiff = { version = "0.2", features = ["serde"] }
+jiff = { version = "1", features = ["serde"] }
 libc = "0.2"
-process-wrap = { version = "10", default-features = false }
+process-wrap = { version = "11", default-features = false }
 # rustls with the OS certificate store; no OpenSSL needed.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
 # Native file dialogs; on Linux through the XDG desktop portal (no GTK).
-rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sysinfo = { version = "0.39", default-features = false }
+sysinfo = { version = "0.40", default-features = false }
 tempfile = "3"
 tokio = { version = "1.53", default-features = false }
 toml = "1"

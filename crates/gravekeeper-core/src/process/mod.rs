@@ -141,7 +141,7 @@ impl ManagedChild {
             // Gravekeeper has no console, so each console child would otherwise open its own
             // console window. Output is captured through pipes regardless.
             command.wrap(process_wrap::tokio::CreationFlags(
-                windows::Win32::System::Threading::CREATE_NO_WINDOW,
+                windows::Win32::System::Threading::CREATE_NO_WINDOW.0,
             ));
         }
         command.wrap(KillOnDrop);

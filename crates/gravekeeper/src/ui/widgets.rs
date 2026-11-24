@@ -380,7 +380,7 @@ pub fn banner(ui: &mut egui::Ui, color: Color32, add: impl FnOnce(&mut egui::Ui)
 pub fn format_time(t: SystemTime) -> String {
     jiff::Timestamp::try_from(t)
         .map(|ts| {
-            ts.to_zoned(jiff::tz::TimeZone::system())
+            ts.to_zoned_datetime(jiff::tz::TimeZone::system())
                 .strftime("%Y-%m-%d %H:%M:%S")
                 .to_string()
         })

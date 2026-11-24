@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use jiff::civil::{Date, DateTime, Time};
 use jiff::tz::TimeZone;
-use jiff::{Timestamp, Zoned};
+use jiff::{Timestamp, ZonedDateTime};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{AppId, secs};
@@ -196,7 +196,7 @@ fn nonzero(d: Duration) -> Duration {
 }
 
 fn next_on_days(days: &[Day], time: Time, tz: &TimeZone, after: Timestamp) -> Option<Timestamp> {
-    let start = after.to_zoned(tz.clone()).date();
+    let start = after.to_zoned_datetime(tz.clone()).date();
     // Eight days covers a full week plus today, whatever the starting point.
     (0..8)
         .filter_map(|offset| start.checked_add(jiff::Span::new().days(offset)).ok())
@@ -207,10 +207,10 @@ fn next_on_days(days: &[Day], time: Time, tz: &TimeZone, after: Timestamp) -> Op
 
 /// Local wall-clock time to an instant: gaps move forward, folds take the earlier instant.
 fn resolve(local: DateTime, tz: &TimeZone) -> Option<Timestamp> {
-    tz.to_ambiguous_zoned(local)
+    tz.to_ambiguous_zoned_datetime(local)
         .compatible()
         .ok()
-        .map(|z: Zoned| z.timestamp())
+        .map(|z: ZonedDateTime| z.timestamp())
 }
 
 /// A run more than this late counts as missed (Gravekeeper was not running, or the computer
@@ -348,7 +348,7 @@ mod tests {
     }
 
     fn local(t: Timestamp, tz: &TimeZone) -> String {
-        t.to_zoned(tz.clone())
+        t.to_zoned_datetime(tz.clone())
             .strftime("%Y-%m-%d %H:%M %a")
             .to_string()
     }
@@ -396,7 +396,10 @@ mod tests {
             time: "01:30".parse().unwrap(),
         };
         let first = next_after(&when, &tz, at("2026-11-01T00:00", &tz), None).unwrap();
-        assert_eq!(first.to_zoned(tz.clone()).offset().seconds(), -4 * 3600);
+        assert_eq!(
+            first.to_zoned_datetime(tz.clone()).offset().seconds(),
+            -4 * 3600
+        );
         // After the first run, the repeated 01:30 is not used again.
         let second = next_after(&when, &tz, first, None).unwrap();
         assert_eq!(local(second, &tz), "2026-11-02 01:30 Mon");

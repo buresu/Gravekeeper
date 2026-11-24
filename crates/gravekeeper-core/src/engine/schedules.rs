@@ -61,6 +61,11 @@ fn to_ts(t: SystemTime) -> Option<Timestamp> {
     Timestamp::try_from(t).ok()
 }
 
+/// `None` for an instant `SystemTime` cannot hold on this platform.
+fn from_ts(t: Timestamp) -> Option<SystemTime> {
+    SystemTime::try_from(t).ok()
+}
+
 impl Engine {
     /// Brings schedule runtimes in line with the configuration. New and changed schedules
     /// are planned; at startup (`catch_up`) missed runs are detected.
@@ -144,16 +149,16 @@ impl Engine {
             .expect("created before planning");
         rt.spec = spec.clone();
         rt.problem = problem;
-        rt.next = plan.and_then(|p| p.next).map(SystemTime::from);
-        if let Some(missed) = plan.and_then(|p| p.missed) {
-            self.missed(spec, SystemTime::from(missed));
+        rt.next = plan.and_then(|p| p.next).and_then(from_ts);
+        if let Some(missed) = plan.and_then(|p| p.missed).and_then(from_ts) {
+            self.missed(spec, missed);
         }
     }
 
     fn missed(&mut self, spec: &ScheduleSpec, due: SystemTime) {
         let then = jiff::Timestamp::try_from(due)
             .map(|t| {
-                t.to_zoned(jiff::tz::TimeZone::system())
+                t.to_zoned_datetime(jiff::tz::TimeZone::system())
                     .strftime("%Y-%m-%d %H:%M")
                     .to_string()
             })
@@ -242,7 +247,7 @@ impl Engine {
         let rt = self.schedules.runtimes.get_mut(id).expect("exists");
         rt.next = match (rt.spec.time_zone(), to_ts(after)) {
             (Ok(tz), Some(after)) if rt.spec.enabled => {
-                schedule::next_after(&rt.spec.when, &tz, after, boot).map(SystemTime::from)
+                schedule::next_after(&rt.spec.when, &tz, after, boot).and_then(from_ts)
             }
             _ => None,
         };

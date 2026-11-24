@@ -122,8 +122,18 @@ fn run(
 ) {
     use sysinfo::{Disks, ProcessRefreshKind, ProcessesToUpdate, System};
 
-    let mut system = System::new();
-    let mut disks = Disks::new_with_refreshed_list();
+    // Fails only where sysinfo does not support the platform; nothing can be sampled then.
+    let mut system = match System::new() {
+        Ok(system) => system,
+        Err(err) => {
+            tracing::warn!(%err, "system resources cannot be monitored on this platform");
+            return;
+        }
+    };
+    // Without disk information the other measurements are still worth sending.
+    let mut disks = Disks::new_with_refreshed_list()
+        .inspect_err(|err| tracing::warn!(%err, "disk usage cannot be monitored"))
+        .ok();
     // CPU usage is measured between two refreshes.
     system.refresh_cpu_usage();
     let mut cpu_valid = false;
@@ -141,7 +151,9 @@ fn run(
 
         system.refresh_cpu_usage();
         system.refresh_memory();
-        disks.refresh(true);
+        if let Some(disks) = &mut disks {
+            disks.refresh(true);
+        }
         let pids: Vec<sysinfo::Pid> = pids
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -164,8 +176,8 @@ fn run(
         });
         let mut seen = std::collections::HashSet::new();
         let disks: Vec<DiskUsage> = disks
-            .list()
             .iter()
+            .flat_map(|disks| disks.iter())
             // Read-only mounts (e.g. an AppImage's own squashfs) are always "full" and
             // cannot fill up further, so they would only raise false alerts.
             .filter(|d| d.total_space() > 0 && !d.is_removable() && !d.is_read_only())

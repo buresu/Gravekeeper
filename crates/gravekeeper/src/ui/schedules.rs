@@ -415,7 +415,7 @@ enum Field {
 
 impl ScheduleEditor {
     fn new_schedule(snapshot: &Snapshot) -> Self {
-        let tomorrow = jiff::Zoned::now()
+        let tomorrow = jiff::ZonedDateTime::now()
             .date()
             .tomorrow()
             .map(|d| format!("{d} 09:00"))

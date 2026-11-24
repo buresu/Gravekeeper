@@ -280,8 +280,8 @@ impl Engine {
             schedule_logs: RwLock::new(HashMap::new()),
         });
         let boot_time = match sysinfo::System::boot_time() {
-            0 => None,
-            secs => Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)),
+            Ok(0) | Err(_) => None,
+            Ok(secs) => Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)),
         };
         Self {
             paths,

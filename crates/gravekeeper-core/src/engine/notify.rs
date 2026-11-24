@@ -42,7 +42,7 @@ pub(super) struct Outcome {
 impl Engine {
     /// Called once the runtime is running; sends what was queued during startup.
     pub(super) fn start_notifications(&mut self) {
-        self.notify.host = sysinfo::System::host_name().unwrap_or_else(|| "unknown".into());
+        self.notify.host = sysinfo::System::host_name().unwrap_or_else(|_| "unknown".into());
         match webhook::Sender::new() {
             Ok(sender) => self.notify.sender = Some(Arc::new(sender)),
             Err(err) => tracing::warn!(error = %err, "webhooks are unavailable"),

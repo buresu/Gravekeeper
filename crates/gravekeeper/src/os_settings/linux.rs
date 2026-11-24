@@ -419,7 +419,7 @@ pub fn notifications_enabled() -> io::Result<bool> {
         Desktop::Kde => {
             let until = dnd_until().read()?;
             // An unreadable date counts as no Do not disturb, like a past one.
-            let now = jiff::Zoned::now().datetime();
+            let now = jiff::ZonedDateTime::now().datetime();
             Ok(!until
                 .as_deref()
                 .and_then(parse_kconfig_datetime)
