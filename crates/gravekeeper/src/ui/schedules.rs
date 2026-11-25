@@ -6,6 +6,7 @@ use std::time::Duration;
 use eframe::egui::{self, Margin, RichText};
 use gravekeeper_core::api::ScheduleStatus;
 use gravekeeper_core::config::AppId;
+use gravekeeper_core::power::{self, Operation, SleepSupport};
 use gravekeeper_core::schedule::{self, Action, Day, MissedRun, ScheduleId, ScheduleSpec, When};
 use gravekeeper_core::{Command, CoreHandle, Snapshot};
 
@@ -13,6 +14,7 @@ use super::logview::LogView;
 use super::picker::{Kind, Picker};
 use super::widgets::{self, format_duration, format_relative, format_time};
 use super::{form, icons, theme};
+use crate::{autostart, os_settings};
 
 #[derive(Default)]
 pub struct SchedulesView {
@@ -20,6 +22,8 @@ pub struct SchedulesView {
     editor: Option<ScheduleEditor>,
     log: Option<LogView>,
     confirm_remove: Option<ScheduleId>,
+    /// Running it now does this to the computer.
+    confirm_power: Option<(ScheduleId, Operation)>,
 }
 
 impl SchedulesView {
@@ -54,7 +58,11 @@ impl SchedulesView {
         widgets::page_header(
             ui,
             "Schedules",
-            Some("Start, stop or restart applications, or run programs, on a timetable."),
+            Some(if power::SUPPORTED {
+                "Start, stop or restart applications, run programs, or restart, shut down or sleep the computer, on a timetable."
+            } else {
+                "Start, stop or restart applications, or run programs, on a timetable."
+            }),
             |ui| {
                 if widgets::primary_button(ui, editable, icons::PLUS, "Add schedule").clicked() {
                     self.start_adding(snapshot);
@@ -160,6 +168,51 @@ impl SchedulesView {
             });
 
         self.confirm_removal(ui, core);
+        self.confirm_power(ui, core);
+    }
+
+    fn confirm_power(&mut self, ui: &mut egui::Ui, core: &CoreHandle) {
+        let Some((id, operation)) = self.confirm_power.clone() else {
+            return;
+        };
+        let (title, text, icon, confirm) = match operation {
+            Operation::Restart => (
+                "Restart the computer?",
+                "It restarts in 1 minute, closing every program. Work that is not saved by then is lost.",
+                icons::RESTART,
+                "Restart",
+            ),
+            Operation::ShutDown => (
+                "Shut down the computer?",
+                "It shuts down in 1 minute, closing every program. Work that is not saved by then is lost.",
+                icons::POWER,
+                "Shut down",
+            ),
+            Operation::Sleep => (
+                "Put the computer to sleep?",
+                "It sleeps at once. Remote connections to it are lost.",
+                icons::POWER,
+                "Sleep",
+            ),
+        };
+        let modal = egui::Modal::new(egui::Id::unique("confirm_power")).show(ui.ctx(), |ui| {
+            ui.set_max_width(400.0);
+            widgets::section_title(ui, title);
+            ui.label(text);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if widgets::danger_button(ui, true, icon, confirm).clicked() {
+                    core.send(Command::RunSchedule(id.clone()));
+                    self.confirm_power = None;
+                }
+                if ui.button("Cancel").clicked() {
+                    self.confirm_power = None;
+                }
+            });
+        });
+        if modal.should_close() {
+            self.confirm_power = None;
+        }
     }
 
     fn confirm_removal(&mut self, ui: &mut egui::Ui, core: &CoreHandle) {
@@ -221,7 +274,11 @@ impl SchedulesView {
                         .on_hover_text("Runs the action once without changing the timetable")
                         .clicked()
                     {
-                        core.send(Command::RunSchedule(spec.id.clone()));
+                        if let Some(operation) = spec.action.operation() {
+                            self.confirm_power = Some((spec.id.clone(), operation));
+                        } else {
+                            core.send(Command::RunSchedule(spec.id.clone()));
+                        }
                     }
                 });
             });
@@ -357,6 +414,11 @@ fn describe_action(action: &Action, snapshot: &Snapshot) -> String {
             text.push_str(&format!(" (time limit {})", format_duration(*timeout)));
             text
         }
+        Action::RestartComputer {} | Action::ShutDownComputer {} | Action::SleepComputer {} => {
+            action
+                .operation()
+                .map_or_else(String::new, |o| o.describe().to_owned())
+        }
     }
 }
 
@@ -375,7 +437,19 @@ enum ActionKind {
     Stop,
     Restart,
     Run,
+    Computer(Operation),
 }
+
+/// In the order offered, in groups.
+const ACTION_KINDS: [&[ActionKind]; 3] = [
+    &[ActionKind::Start, ActionKind::Stop, ActionKind::Restart],
+    &[ActionKind::Run],
+    &[
+        ActionKind::Computer(Operation::Restart),
+        ActionKind::Computer(Operation::ShutDown),
+        ActionKind::Computer(Operation::Sleep),
+    ],
+];
 
 enum EditorAction {
     None,
@@ -403,6 +477,8 @@ struct ScheduleEditor {
     missed: MissedRun,
     time_zone: String,
     wake: bool,
+    /// What to know before choosing the operation; read when it is first shown.
+    problems: Option<(Operation, Vec<&'static str>)>,
     errors: Vec<String>,
     picker: Picker<Field>,
 }
@@ -440,6 +516,7 @@ impl ScheduleEditor {
             missed: MissedRun::Skip,
             time_zone: String::new(),
             wake: false,
+            problems: None,
             errors: Vec::new(),
             picker: Picker::default(),
         }
@@ -506,6 +583,11 @@ impl ScheduleEditor {
                     .unwrap_or_default();
                 editor.timeout = timeout.as_secs();
             }
+            Action::RestartComputer {} => editor.action = ActionKind::Computer(Operation::Restart),
+            Action::ShutDownComputer {} => {
+                editor.action = ActionKind::Computer(Operation::ShutDown)
+            }
+            Action::SleepComputer {} => editor.action = ActionKind::Computer(Operation::Sleep),
         }
         editor
     }
@@ -531,6 +613,7 @@ impl ScheduleEditor {
             missed: MissedRun::Skip,
             time_zone: String::new(),
             wake: false,
+            problems: None,
             errors: Vec::new(),
             picker: Picker::default(),
         }
@@ -592,6 +675,7 @@ impl ScheduleEditor {
                     timeout: Duration::from_secs(self.timeout),
                 })
             }
+            ActionKind::Computer(operation) => Ok(operation.into()),
         };
         let (when, action) = match (when, action) {
             (Ok(w), Ok(a)) => (w, a),
@@ -608,10 +692,14 @@ impl ScheduleEditor {
             enabled: self.enabled,
             when,
             action,
-            missed: self.missed,
+            // Not offered for these.
+            missed: match self.action {
+                ActionKind::Computer(_) => MissedRun::Skip,
+                _ => self.missed,
+            },
             time_zone: (!tz.is_empty()).then(|| tz.to_owned()),
             // A run after boot has nothing to wake: the computer has just started.
-            wake: self.wake && self.when != WhenKind::AfterBoot,
+            wake: self.wake && self.can_wake(),
         };
         errors.extend(schedule::validate(&spec));
         if errors.is_empty() {
@@ -619,6 +707,22 @@ impl ScheduleEditor {
         } else {
             Err(errors)
         }
+    }
+
+    fn problems(&mut self, operation: Operation) -> &[&'static str] {
+        if self
+            .problems
+            .as_ref()
+            .is_none_or(|(of, _)| *of != operation)
+        {
+            self.problems = Some((operation, operation_problems(operation)));
+        }
+        self.problems.as_ref().map_or(&[], |(_, found)| found)
+    }
+
+    /// Whether waking the computer makes sense for this schedule.
+    fn can_wake(&self) -> bool {
+        self.when != WhenKind::AfterBoot && self.action != ActionKind::Computer(Operation::Sleep)
     }
 
     fn show(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) -> EditorAction {
@@ -695,14 +799,16 @@ impl ScheduleEditor {
                     });
                 }
                 if self.when != WhenKind::AfterBoot {
-                    form::row(ui, "Missed runs", Some("Runs due while Gravekeeper was not running or the computer was asleep."), |ui| {
-                        ui.horizontal(|ui| {
-                            for m in [MissedRun::Skip, MissedRun::RunOnce] {
-                                ui.selectable_value(&mut self.missed, m, missed_label(m));
-                            }
+                    if !matches!(self.action, ActionKind::Computer(_)) {
+                        form::row(ui, "Missed runs", Some("Runs due while Gravekeeper was not running or the computer was asleep."), |ui| {
+                            ui.horizontal(|ui| {
+                                for m in [MissedRun::Skip, MissedRun::RunOnce] {
+                                    ui.selectable_value(&mut self.missed, m, missed_label(m));
+                                }
+                            });
                         });
-                    });
-                    if gravekeeper_core::wake::SUPPORTED {
+                    }
+                    if gravekeeper_core::wake::SUPPORTED && self.can_wake() {
                         form::row(ui, "Wake the computer", Some("Wakes the computer from sleep a minute before each run. Gravekeeper must be running, and wake timers allowed on the System page."), |ui| {
                             ui.checkbox(&mut self.wake, "Enabled");
                         });
@@ -711,12 +817,35 @@ impl ScheduleEditor {
             });
 
             form::section(ui, "Action", None, |ui| {
-                form::row(ui, "Do", None, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for kind in [ActionKind::Start, ActionKind::Stop, ActionKind::Restart, ActionKind::Run] {
-                            ui.selectable_value(&mut self.action, kind, action_label(kind));
+                form::labelled_row(ui, "Do", None, |ui, label| {
+                    egui::ComboBox::from_id_salt("schedule_action")
+                        .width(240.0)
+                        .selected_text(action_label(self.action))
+                        .show_ui(ui, |ui| {
+                            for (i, group) in ACTION_KINDS.into_iter().enumerate() {
+                                let offered = |kind: &ActionKind| {
+                                    power::SUPPORTED
+                                        || !matches!(kind, ActionKind::Computer(_))
+                                        || *kind == self.action
+                                };
+                                let kinds: Vec<_> = group.iter().copied().filter(offered).collect();
+                                if i > 0 && !kinds.is_empty() {
+                                    ui.separator();
+                                }
+                                for kind in kinds {
+                                    ui.selectable_value(&mut self.action, kind, action_label(kind));
+                                }
+                            }
+                        })
+                        .response
+                        .labelled_by(label);
+                    if let ActionKind::Computer(operation) = self.action {
+                        widgets::hint(ui, operation_hint(operation));
+                        for problem in self.problems(operation) {
+                            let p = theme::palette(ui);
+                            ui.add(egui::Label::new(RichText::new(widgets::icon_text(icons::WARNING, problem)).color(p.warning)).wrap());
                         }
-                    });
+                    }
                 });
                 if self.action == ActionKind::Run {
                     form::row(ui, "Program", Some("Run directly, not through a shell."), |ui| {
@@ -731,7 +860,7 @@ impl ScheduleEditor {
                     form::row(ui, "Time limit", Some("Stopped if it runs longer."), |ui| {
                         form::seconds(ui, &mut self.timeout, 1..=86_400)
                     });
-                } else {
+                } else if !matches!(self.action, ActionKind::Computer(_)) {
                     form::labelled_row(ui, "Application", None, |ui, label| {
                         let name = self
                             .app
@@ -756,6 +885,47 @@ impl ScheduleEditor {
     }
 }
 
+fn operation_hint(operation: Operation) -> &'static str {
+    match operation {
+        Operation::Restart => {
+            "Warns 1 minute ahead, then closes every program; unsaved work is lost. Skipped if the computer started less than 10 minutes ago, or if Gravekeeper is not running at the time."
+        }
+        Operation::ShutDown => {
+            "Warns 1 minute ahead, then closes every program and turns the computer off; unsaved work is lost. Gravekeeper cannot turn it on again. Skipped if the computer started less than 10 minutes ago, or if Gravekeeper is not running at the time."
+        }
+        Operation::Sleep => {
+            "Sleeps at once, without a warning. Schedules that wake the computer wake it again. Skipped if the computer started less than 10 minutes ago, or if Gravekeeper is not running at the time."
+        }
+    }
+}
+
+fn operation_problems(operation: Operation) -> Vec<&'static str> {
+    let mut problems = Vec::new();
+    match operation {
+        // What keeps Gravekeeper, and so its schedules, from running once the computer is back.
+        Operation::Restart | Operation::ShutDown => {
+            if matches!(os_settings::auto_login(), Ok(None)) {
+                problems.push(
+                    "Automatic logon is off (System page): Gravekeeper does not run again until someone signs in.",
+                );
+            }
+            if matches!(autostart::is_enabled(), Ok(false)) {
+                problems.push(
+                    "Launch at login is off (Settings page): Gravekeeper does not start again by itself.",
+                );
+            }
+        }
+        Operation::Sleep => match power::sleep_support() {
+            SleepSupport::Sleeps => {}
+            SleepSupport::ModernStandby => problems.push(
+                "This computer uses Modern Standby: its display is turned off, which lets it sleep. Programs that keep it awake can prevent that.",
+            ),
+            SleepSupport::Unsupported => problems.push("This computer does not support sleep."),
+        },
+    }
+    problems
+}
+
 fn when_label(kind: WhenKind) -> &'static str {
     match kind {
         WhenKind::Once => "Once",
@@ -772,6 +942,9 @@ fn action_label(kind: ActionKind) -> &'static str {
         ActionKind::Stop => "Stop app",
         ActionKind::Restart => "Restart app",
         ActionKind::Run => "Run program",
+        ActionKind::Computer(Operation::Restart) => "Restart computer",
+        ActionKind::Computer(Operation::ShutDown) => "Shut down computer",
+        ActionKind::Computer(Operation::Sleep) => "Sleep computer",
     }
 }
 
@@ -820,6 +993,28 @@ mod tests {
             delay: Duration::from_secs(60),
         };
         assert!(!ScheduleEditor::from_spec(&spec).build().unwrap().wake);
+    }
+
+    #[test]
+    fn computer_operations_are_never_made_up_for() {
+        for operation in [Operation::Restart, Operation::ShutDown, Operation::Sleep] {
+            let mut spec: ScheduleSpec = toml::from_str(
+                "id = \"s\"\nname = \"n\"\nwhen = { kind = \"daily\", time = \"04:00:00\" }\naction = { kind = \"restart-computer\" }",
+            )
+            .unwrap();
+            spec.action = operation.into();
+            let mut editor = ScheduleEditor::from_spec(&spec);
+            assert_eq!(editor.build().unwrap(), spec);
+            // Chosen for another action before.
+            editor.missed = MissedRun::RunOnce;
+            editor.wake = true;
+            let built = editor.build().unwrap();
+            assert_eq!(built.missed, MissedRun::Skip);
+            // Waking the computer to put it to sleep is pointless.
+            assert_eq!(built.wake, operation != Operation::Sleep);
+            editor.when = WhenKind::AfterBoot;
+            assert!(editor.build().is_err());
+        }
     }
 
     #[test]

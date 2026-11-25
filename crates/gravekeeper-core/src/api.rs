@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{AppId, AppSpec, Config, GeneralSettings, LoggingSettings};
 use crate::monitor::{DiskUsage, MonitoringSettings, ProcessUsage, Usage};
+use crate::power::Operation;
 use crate::schedule::{ScheduleId, ScheduleSpec};
 use crate::webhook::{WebhookId, WebhookSpec};
 
@@ -37,6 +38,8 @@ pub enum Command {
     RemoveSchedule(ScheduleId),
     /// Runs a schedule's action now, outside its timetable.
     RunSchedule(ScheduleId),
+    /// Stops a restart or shutdown of the computer that a schedule started.
+    CancelPower,
     SaveWebhook(Box<WebhookSpec>),
     RemoveWebhook(WebhookId),
     /// Sends a test message; the outcome is reported as an event.
@@ -257,6 +260,13 @@ pub struct ScheduleRun {
     pub summary: String,
 }
 
+/// A restart or shutdown of the computer that is counting down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingPower {
+    pub operation: Operation,
+    pub at: SystemTime,
+}
+
 /// Latest system measurements and a short history for charts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Metrics {
@@ -297,6 +307,8 @@ pub struct Snapshot {
     /// In configuration (start) order.
     pub apps: Vec<AppStatus>,
     pub schedules: Vec<ScheduleStatus>,
+    /// Set while a schedule is restarting or shutting down the computer.
+    pub pending_power: Option<PendingPower>,
     pub metrics: Metrics,
     /// Most recent events, oldest first.
     pub events: Vec<Event>,

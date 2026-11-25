@@ -89,6 +89,12 @@ name = "Clean temporary files"
 when = { kind = "interval", every = 3600 }
 action = { kind = "run", program = "/usr/local/bin/cleanup", args = ["--all"], timeout = 600 }
 
+[[schedule]]
+id = "reboot"
+name = "Nightly reboot"
+when = { kind = "daily", time = "04:00" }
+action = { kind = "restart-computer" }   # Windows only
+
 [[webhook]]
 id = "ops"
 name = "Ops channel"
@@ -125,13 +131,23 @@ Applications with `autostart = true` start in the order they are listed. Each on
 | `interval` | `every` (seconds) | repeatedly, counted from the previous run (it continues across restarts of Gravekeeper) |
 | `after-boot` | `delay` (seconds) | once per boot of the computer, however late Gravekeeper starts |
 
-`action` is `start`, `stop` or `restart` (with `app`), or `run` (with `program`, optional `args`, `cwd`, and `timeout` in seconds, default 3600 — the program is killed if it runs longer).
+`action` is `start`, `stop` or `restart` (with `app`), or `run` (with `program`, optional `args`, `cwd`, and `timeout` in seconds, default 3600 — the program is killed if it runs longer), or `restart-computer`, `shut-down-computer` or `sleep-computer` (Windows only, no fields).
 
 **Time zones and DST.** Times are wall-clock times in `time_zone` (the system zone if absent). A time skipped by a DST change runs at the next valid instant; a time that occurs twice runs once, at the first occurrence.
 
 **Missed runs.** A run counts as missed when it is more than 2 minutes late — because Gravekeeper was not running or the computer was asleep. With `missed = "skip"` it is recorded (a `schedule_missed` event) and the next regular run is awaited; with `missed = "run-once"` it runs once as soon as possible, however many runs were missed. The time of the last run, and when the schedule was added or its timing (`when`, `time_zone`, `enabled`) last changed, are kept in the history database, so this also works across restarts — including a first run that was due before the schedule ever ran (e.g. a `once` schedule whose time passed while the computer was off). Runs due before the schedule was added or changed are never owed. A `run` action that is still running when the next run is due is not started twice; that run is skipped and recorded.
 
 **Waking the computer.** With `wake = true` (Windows only), the computer wakes from sleep a minute before each run, so the run is on time and not missed. Gravekeeper must be running when the computer goes to sleep, and the power plan must allow wake timers (see the System page). When the run starts, the display turns on and the idle timers restart; after that the computer sleeps again according to its power plan. Elsewhere a schedule with `wake = true` still runs, and a `schedule_failed` event says it could not wake the computer.
+
+**Restarting and shutting down the computer.** With `restart-computer` or `shut-down-computer` (Windows only), Windows warns 1 minute ahead and then restarts or turns the computer off, closing every program and signing out every user; unsaved work is lost. The window shows the countdown and can cancel it. No administrator rights are needed, unless a policy keeps the account from shutting down the computer. Windows counts down on its own, so quitting Gravekeeper does not stop it. Gravekeeper cannot turn a computer on that was shut down; a shutdown is a full one, not a fast-startup one.
+
+- Gravekeeper must be running at the time, so automatic logon (System page) and launch at login (Settings page) should be on. Otherwise nothing runs once the computer is back until someone signs in, including the next restart.
+- `when` must be `once`, `daily` or `weekly`, `missed` must be `skip`, and a run is skipped (a `schedule_missed` event) if the computer started less than 10 minutes ago. Together these keep it from restarting in a loop. The same goes for `sleep-computer`.
+- Applications are not started automatically during the countdown. Those that Windows closes afterwards are recorded as stopped, not as unexpected exits.
+- Windows may refuse a restart or shutdown, or accept it and then not carry it out. If it has not happened 3 minutes after it should have, it is tried again, up to 3 times in all; each failure is a `schedule_failed` event. Stopping it with `shutdown /a` counts as such a failure and is tried again; cancelling it in the window is not.
+- If the Windows Task Scheduler already restarts the computer, remove that task, or it restarts twice.
+
+**Putting the computer to sleep.** `sleep-computer` (Windows only) puts the computer to sleep at once, without a warning; nothing is closed. Other schedules with `wake = true` wake it again. A computer with Modern Standby (`powercfg /a` lists only S0) has no sleep that a program can ask for, so its display is turned off instead, which lets it enter Modern Standby; a program that keeps the computer awake can prevent that, and Gravekeeper cannot tell. On a computer without either, the run fails. A failed run is reported (`schedule_failed`) and not tried again.
 
 ## Webhooks
 
@@ -158,7 +174,7 @@ The file is rejected as a whole if it:
 - is not valid TOML, or contains unknown keys (typos are reported, not ignored)
 - has no `schema_version`, or a newer one than this build understands
 - has an application without a name or program, duplicate ids or names, an environment variable name that is empty or contains `=`, or a restart policy whose initial backoff is 0 or larger than the maximum
-- has a schedule with an unknown time zone, no days (`weekly`), a zero interval, an empty program or zero timeout (`run`), or one that refers to an application that does not exist
+- has a schedule with an unknown time zone, no days (`weekly`), a zero interval, an empty program or zero timeout (`run`), a `restart-computer`, `shut-down-computer` or `sleep-computer` action that is not `once`, `daily` or `weekly` or has `missed = "run-once"`, or one that refers to an application that does not exist
 - has a webhook whose URL does not start with `https://` or `http://`, an invalid header name, or an event that cannot be sent
 - has a monitoring threshold above 100, a zero interval, or a zero log file size
 

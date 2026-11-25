@@ -196,6 +196,78 @@ fn every_page_renders_in_the_sidebar_navigation() {
     assert!(harness.query_by_label_contains("Missed runs").is_some());
 }
 
+/// The engine is real, so this must not confirm, and the schedule is long past.
+#[cfg(windows)]
+#[test]
+fn restarting_the_computer_by_hand_asks_first() {
+    let core = core_with(
+        r#"
+        schema_version = 2
+        [monitoring]
+        enabled = false
+        [[schedule]]
+        id = "reboot"
+        name = "Nightly reboot"
+        when = { kind = "once", at = "2020-01-01T03:00" }
+        action = { kind = "restart-computer" }
+        "#,
+    );
+    let mut harness = open_ui(core, Tab::Schedules, egui::Theme::Dark, false);
+    harness.get_by_label_contains("Run now").click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label_contains("Restart the computer?")
+            .is_some()
+    );
+    harness.get_by_label("Cancel").click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label_contains("Restart the computer?")
+            .is_none()
+    );
+    let snapshot = core.snapshot();
+    assert_eq!(snapshot.pending_power, None);
+    assert!(snapshot.schedules[0].last_run.is_none());
+
+    // The editor offers the actions, without missed runs.
+    harness.get_by_label_contains("Edit").click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label_contains("Warns 1 minute ahead")
+            .is_some()
+    );
+    assert!(harness.query_by_label_contains("Missed runs").is_none());
+    assert!(
+        harness
+            .query_by_label_contains("Wake the computer")
+            .is_some()
+    );
+    harness
+        .get_by_role_and_label(egui::Role::ComboBox, "Do")
+        .scroll_to_me();
+    // Scrolling is animated, and the list takes a frame to measure.
+    harness.run_steps(20);
+    harness
+        .get_by_role_and_label(egui::Role::ComboBox, "Do")
+        .click();
+    harness.run_steps(8);
+    harness.get_by_label("Sleep computer").click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label_contains("Sleeps at once, without a warning")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label_contains("Wake the computer")
+            .is_none()
+    );
+}
+
 /// Writes PNGs of every page in both themes to `$GRAVEKEEPER_SCREENSHOTS` (needs a GPU or a
 /// software Vulkan/GL driver).
 #[test]

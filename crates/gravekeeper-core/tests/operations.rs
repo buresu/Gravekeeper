@@ -1,7 +1,8 @@
 //! End-to-end tests of the operational features: start order, schedules, webhooks, log
 //! files, monitoring and configuration backups.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::collections::VecDeque;
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant};
 use gravekeeper_core::api::{AppState, EventKind};
 use gravekeeper_core::config::{self, AppSpec, Config};
 use gravekeeper_core::paths::Paths;
+use gravekeeper_core::power::{Operation, Power};
 use gravekeeper_core::schedule::{Action, MissedRun, ScheduleId, ScheduleSpec, When};
 use gravekeeper_core::webhook::WebhookSpec;
 use gravekeeper_core::{Command, CoreHandle, Snapshot};
@@ -311,6 +313,344 @@ fn a_first_run_missed_while_stopped_is_caught_up() {
             .iter()
             .any(|e| e.kind == EventKind::ScheduleMissed && e.message.contains("running it now"))
     );
+}
+
+/// A computer that records what it is asked to do instead of restarting.
+struct FakePower {
+    calls: Arc<Mutex<Vec<&'static str>>>,
+    /// Answers to the first restarts; later ones are accepted.
+    answers: Mutex<VecDeque<io::Result<()>>>,
+    uptime: Duration,
+    grace: Duration,
+    settle: Duration,
+}
+
+impl FakePower {
+    fn new(grace: Duration, settle: Duration) -> Self {
+        Self {
+            calls: Arc::default(),
+            answers: Mutex::default(),
+            uptime: Duration::from_secs(86_400),
+            grace,
+            settle,
+        }
+    }
+}
+
+impl Power for FakePower {
+    fn shut_down(&self, restart: bool, _grace: Duration, _message: &str) -> io::Result<()> {
+        let call = if restart { "restart" } else { "shut down" };
+        self.calls.lock().unwrap().push(call);
+        self.answers.lock().unwrap().pop_front().unwrap_or(Ok(()))
+    }
+
+    fn cancel(&self) -> io::Result<()> {
+        self.calls.lock().unwrap().push("cancel");
+        Ok(())
+    }
+
+    fn sleep(&self) -> io::Result<()> {
+        self.calls.lock().unwrap().push("sleep");
+        self.answers.lock().unwrap().pop_front().unwrap_or(Ok(()))
+    }
+
+    fn uptime(&self) -> Option<Duration> {
+        Some(self.uptime)
+    }
+
+    fn grace(&self) -> Duration {
+        self.grace
+    }
+
+    fn settle(&self) -> Duration {
+        self.settle
+    }
+}
+
+fn restart_schedule(when: When) -> ScheduleSpec {
+    ScheduleSpec {
+        when,
+        action: Action::RestartComputer {},
+        ..run_schedule("reboot", &[], Duration::from_secs(1))
+    }
+}
+
+fn daily_restart() -> ScheduleSpec {
+    restart_schedule(When::Daily {
+        time: "03:00".parse().unwrap(),
+    })
+}
+
+/// A schedule that restarts the computer two seconds from now.
+fn restart_soon() -> ScheduleSpec {
+    let soon = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(2);
+    restart_schedule(When::Once {
+        at: soon.to_zoned_datetime(jiff::tz::TimeZone::UTC).datetime(),
+    })
+}
+
+fn start_on(power: FakePower, config: Config) -> (tempfile::TempDir, CoreHandle) {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path());
+    config::save(&paths.config_file, &quiet(config)).unwrap();
+    let core = CoreHandle::start_with(paths, Arc::new(|| {}), Arc::new(power)).unwrap();
+    (dir, core)
+}
+
+fn messages(s: &Snapshot, kind: EventKind) -> Vec<&str> {
+    s.events
+        .iter()
+        .filter(|e| e.kind == kind)
+        .map(|e| e.message.as_str())
+        .collect()
+}
+
+const LONG: Duration = Duration::from_secs(600);
+
+#[test]
+fn a_schedule_restarts_the_computer_once() {
+    let power = FakePower::new(LONG, LONG);
+    let calls = Arc::clone(&power.calls);
+    let (_dir, core) = start_on(
+        power,
+        Config {
+            schedules: vec![restart_soon()],
+            ..Config::default()
+        },
+    );
+    let snapshot = wait_for(&core, "the restart", |s| s.pending_power.is_some());
+    assert!(has(&snapshot, EventKind::ScheduleSucceeded));
+
+    // Asking again during the countdown does not start a second one.
+    core.send(Command::RunSchedule(snapshot.schedules[0].id.clone()));
+    let snapshot = wait_for(&core, "refusal", |s| has(s, EventKind::ScheduleFailed));
+    assert!(messages(&snapshot, EventKind::ScheduleFailed)[0].contains("already"));
+    assert_eq!(*calls.lock().unwrap(), ["restart"]);
+}
+
+#[test]
+fn a_computer_that_just_started_is_not_restarted() {
+    let mut power = FakePower::new(LONG, LONG);
+    power.uptime = Duration::from_secs(60);
+    let calls = Arc::clone(&power.calls);
+    let (_dir, core) = start_on(
+        power,
+        Config {
+            schedules: vec![restart_soon()],
+            ..Config::default()
+        },
+    );
+    let snapshot = wait_for(&core, "the skipped run", |s| {
+        has(s, EventKind::ScheduleMissed)
+    });
+    assert!(messages(&snapshot, EventKind::ScheduleMissed)[0].contains("started only 1m ago"));
+    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!(snapshot.pending_power, None);
+}
+
+#[test]
+fn applications_are_not_restarted_before_the_computer_unless_cancelled() {
+    let mut app = helper_app("short", &["sleep", "1"]);
+    app.restart.mode = config::RestartMode::Always;
+    let app_id = app.id.clone();
+    let schedule = daily_restart();
+    let schedule_id = schedule.id.clone();
+    let power = FakePower::new(LONG, LONG);
+    let calls = Arc::clone(&power.calls);
+    let (_dir, core) = start_on(
+        power,
+        Config {
+            apps: vec![app],
+            schedules: vec![schedule],
+            ..Config::default()
+        },
+    );
+    core.send(Command::Start(app_id.clone()));
+    core.send(Command::RunSchedule(schedule_id));
+    let state = |s: &Snapshot| s.app(&app_id).unwrap().state;
+    wait_for(&core, "exit", |s| state(s) == AppState::Backoff);
+    // Longer than the backoff of 1 second.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(state(&core.snapshot()), AppState::Backoff);
+
+    core.send(Command::CancelPower);
+    let snapshot = wait_for(&core, "started again", |s| {
+        messages(s, EventKind::AppStarted).len() >= 2
+    });
+    assert_eq!(snapshot.pending_power, None);
+    assert!(messages(&snapshot, EventKind::ScheduleFailed)[0].contains("cancelled"));
+    assert_eq!(*calls.lock().unwrap(), ["restart", "cancel"]);
+}
+
+#[test]
+fn applications_closed_by_the_restart_are_not_reported_as_exited() {
+    let mut app = helper_app("short", &["exit", "3"]);
+    app.restart.mode = config::RestartMode::Always;
+    let app_id = app.id.clone();
+    let schedule = daily_restart();
+    let schedule_id = schedule.id.clone();
+    let (_dir, core) = start_on(
+        FakePower::new(Duration::ZERO, LONG),
+        Config {
+            apps: vec![app],
+            schedules: vec![schedule],
+            ..Config::default()
+        },
+    );
+    core.send(Command::RunSchedule(schedule_id));
+    core.send(Command::Start(app_id));
+    let snapshot = wait_for(&core, "exit", |s| has(s, EventKind::AppStopped));
+    assert!(messages(&snapshot, EventKind::AppStopped)[0].contains("as the computer restarts"));
+    assert!(!has(&snapshot, EventKind::AppExited));
+    assert!(!has(&snapshot, EventKind::RestartScheduled));
+}
+
+#[test]
+fn a_restart_that_does_not_happen_is_tried_again() {
+    let tick = Duration::from_millis(100);
+    let power = FakePower::new(tick, tick);
+    power
+        .answers
+        .lock()
+        .unwrap()
+        .push_back(Err(io::Error::other("a restart is already scheduled")));
+    let calls = Arc::clone(&power.calls);
+    let schedule = daily_restart();
+    let id = schedule.id.clone();
+    let (_dir, core) = start_on(
+        power,
+        Config {
+            schedules: vec![schedule],
+            ..Config::default()
+        },
+    );
+    core.send(Command::RunSchedule(id));
+    let snapshot = wait_for(&core, "giving up", |s| {
+        messages(s, EventKind::ScheduleFailed)
+            .iter()
+            .any(|m| m.contains("gave up after 3 attempts"))
+    });
+    // Refused, accepted but not carried out, the same again.
+    assert_eq!(*calls.lock().unwrap(), ["restart"; 3]);
+    let failures = messages(&snapshot, EventKind::ScheduleFailed);
+    assert!(
+        failures[0].contains("already scheduled; trying again"),
+        "{failures:?}"
+    );
+    assert!(
+        failures[1].contains("did not restart; trying again"),
+        "{failures:?}"
+    );
+    assert_eq!(failures.len(), 3, "{failures:?}");
+    assert_eq!(snapshot.pending_power, None);
+}
+
+#[test]
+fn a_restart_that_is_not_allowed_is_not_tried_again() {
+    let tick = Duration::from_millis(100);
+    let power = FakePower::new(tick, tick);
+    power
+        .answers
+        .lock()
+        .unwrap()
+        .push_back(Err(io::ErrorKind::PermissionDenied.into()));
+    let calls = Arc::clone(&power.calls);
+    let schedule = daily_restart();
+    let id = schedule.id.clone();
+    let (_dir, core) = start_on(
+        power,
+        Config {
+            schedules: vec![schedule],
+            ..Config::default()
+        },
+    );
+    core.send(Command::RunSchedule(id));
+    wait_for(&core, "failure", |s| has(s, EventKind::ScheduleFailed));
+    std::thread::sleep(tick * 5);
+    assert_eq!(*calls.lock().unwrap(), ["restart"]);
+}
+
+#[test]
+fn a_schedule_shuts_down_the_computer() {
+    let power = FakePower::new(LONG, LONG);
+    let calls = Arc::clone(&power.calls);
+    let mut schedule = restart_soon();
+    schedule.action = Action::ShutDownComputer {};
+    let (_dir, core) = start_on(
+        power,
+        Config {
+            schedules: vec![schedule],
+            ..Config::default()
+        },
+    );
+    let snapshot = wait_for(&core, "the shutdown", |s| s.pending_power.is_some());
+    assert_eq!(
+        snapshot.pending_power.unwrap().operation,
+        Operation::ShutDown
+    );
+    assert_eq!(*calls.lock().unwrap(), ["shut down"]);
+
+    core.send(Command::CancelPower);
+    let snapshot = wait_for(&core, "cancelling", |s| has(s, EventKind::ScheduleFailed));
+    assert!(messages(&snapshot, EventKind::ScheduleFailed)[0].contains("does not shut down"));
+    assert_eq!(snapshot.pending_power, None);
+}
+
+#[test]
+fn a_schedule_puts_the_computer_to_sleep() {
+    let power = FakePower::new(LONG, LONG);
+    power
+        .answers
+        .lock()
+        .unwrap()
+        .extend([Ok(()), Err(io::Error::other("no sleep today"))]);
+    let calls = Arc::clone(&power.calls);
+    let mut schedule = restart_soon();
+    schedule.action = Action::SleepComputer {};
+    let id = schedule.id.clone();
+    let mut app = helper_app("kept", &["sleep", "60"]);
+    app.autostart = true;
+    let (_dir, core) = start_on(
+        power,
+        Config {
+            apps: vec![app],
+            schedules: vec![schedule],
+            ..Config::default()
+        },
+    );
+    let snapshot = wait_for(&core, "sleep", |s| has(s, EventKind::ScheduleSucceeded));
+    // Nothing is closed, so nothing is held back.
+    assert_eq!(snapshot.pending_power, None);
+    assert_eq!(snapshot.apps[0].state, AppState::Running);
+
+    // A failure is reported, and not tried again.
+    core.send(Command::RunSchedule(id));
+    let snapshot = wait_for(&core, "failure", |s| has(s, EventKind::ScheduleFailed));
+    assert!(messages(&snapshot, EventKind::ScheduleFailed)[0].contains("no sleep today"));
+    assert_eq!(*calls.lock().unwrap(), ["sleep"; 2]);
+}
+
+#[test]
+fn a_computer_about_to_restart_is_not_put_to_sleep() {
+    let power = FakePower::new(LONG, LONG);
+    let calls = Arc::clone(&power.calls);
+    let restart = daily_restart();
+    let mut sleep = daily_restart();
+    sleep.action = Action::SleepComputer {};
+    let ids = [restart.id.clone(), sleep.id.clone()];
+    let (_dir, core) = start_on(
+        power,
+        Config {
+            schedules: vec![restart, sleep],
+            ..Config::default()
+        },
+    );
+    for id in ids {
+        core.send(Command::RunSchedule(id));
+    }
+    let snapshot = wait_for(&core, "refusal", |s| has(s, EventKind::ScheduleFailed));
+    assert!(messages(&snapshot, EventKind::ScheduleFailed)[0].contains("already about to restart"));
+    assert_eq!(*calls.lock().unwrap(), ["restart"]);
 }
 
 /// A tiny HTTP server answering with the given status codes in turn (then 200), recording

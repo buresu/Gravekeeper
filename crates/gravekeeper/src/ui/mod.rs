@@ -16,7 +16,7 @@ mod webhooks;
 mod widgets;
 
 use std::sync::{Arc, Once};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui::{self, Margin, RichText, ViewportCommand};
 use gravekeeper_core::api::AppState;
@@ -373,6 +373,32 @@ impl eframe::App for GravekeeperApp<'_> {
                                 picker::reveal(&snapshot.config_path);
                             }
                         });
+                    });
+                    ui.add_space(12.0);
+                }
+                if let Some(pending) = snapshot.pending_power {
+                    widgets::banner(ui, p.warning, |ui| {
+                        let left = pending
+                            .at
+                            .duration_since(SystemTime::now())
+                            .unwrap_or_default();
+                        let verb = pending.operation.verb_s();
+                        let text = if left.is_zero() {
+                            format!("The computer {verb} now.")
+                        } else {
+                            format!(
+                                "The computer {verb} in {}. Save your work.",
+                                widgets::format_duration(left)
+                            )
+                        };
+                        ui.label(
+                            RichText::new(widgets::icon_text(icons::POWER, &text))
+                                .strong()
+                                .color(p.warning),
+                        );
+                        if widgets::button(ui, true, icons::CLOSE, "Cancel").clicked() {
+                            self.core.send(Command::CancelPower);
+                        }
                     });
                     ui.add_space(12.0);
                 }

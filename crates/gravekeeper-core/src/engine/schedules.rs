@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 
 use super::{Engine, Internal, format_duration};
 use crate::api::{AppState, EventKind, EventLevel, ScheduleRun, ScheduleStatus};
+use crate::power::Operation;
 use crate::process::{ExitKind, LogBuffer, ManagedChild, ProcessSpec, Stream};
 use crate::schedule::{self, Action, MissedRun, ScheduleId, ScheduleSpec};
 use crate::wake::{self, WakeTimer};
@@ -282,6 +283,18 @@ impl Engine {
             );
             return;
         }
+        if !manual
+            && spec.action.operation().is_some()
+            && let Some(why) = self.too_soon_after_boot()
+        {
+            self.emit(
+                EventLevel::Warning,
+                EventKind::ScheduleMissed,
+                None,
+                format!("{}: skipped because {why}", spec.name),
+            );
+            return;
+        }
         self.schedules.last_runs.insert(id.clone(), now);
         if let Some(store) = &self.store {
             store.record_schedule_run(id.clone(), now);
@@ -291,6 +304,13 @@ impl Engine {
             Action::Start { app } | Action::Stop { app } | Action::Restart { app } => {
                 Some(self.control_app(&spec.action, app))
             }
+            Action::RestartComputer {} => {
+                Some(self.shut_down_computer(id, &spec.name, Operation::Restart))
+            }
+            Action::ShutDownComputer {} => {
+                Some(self.shut_down_computer(id, &spec.name, Operation::ShutDown))
+            }
+            Action::SleepComputer {} => self.sleep_computer(id, now).err().map(Err),
             Action::Run {
                 program,
                 args,
@@ -362,7 +382,10 @@ impl Engine {
                 }
                 Ok(format!("restarted {name}"))
             }
-            Action::Run { .. } => unreachable!("handled by the caller"),
+            Action::Run { .. }
+            | Action::RestartComputer {}
+            | Action::ShutDownComputer {}
+            | Action::SleepComputer {} => unreachable!("handled by the caller"),
         }
     }
 
@@ -396,7 +419,7 @@ impl Engine {
         self.finish_schedule(&finished.id, started, outcome);
     }
 
-    fn finish_schedule(
+    pub(super) fn finish_schedule(
         &mut self,
         id: &ScheduleId,
         at: SystemTime,

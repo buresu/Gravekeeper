@@ -1,3 +1,4 @@
+mod computer;
 mod monitoring;
 mod notify;
 mod schedules;
@@ -19,6 +20,7 @@ use crate::api::{
 use crate::config::{self, AppId, AppSpec, Config, RestartMode};
 use crate::logfile::{LogWriter, LogWriterThread};
 use crate::paths::{Paths, create_private_dir};
+use crate::power::{self, Power};
 use crate::process::{ExitKind, FileSink, LogBuffer, LogLine, ManagedChild, Stream};
 use crate::schedule::ScheduleId;
 use crate::store::Store;
@@ -76,6 +78,15 @@ pub struct CoreHandle {
 impl CoreHandle {
     /// Loads the configuration and starts the engine on a dedicated thread.
     pub fn start(paths: Paths, notifier: Notifier) -> Result<Self, StartError> {
+        Self::start_with(paths, notifier, Arc::new(power::System))
+    }
+
+    /// [`Self::start`] on something other than this computer, for tests.
+    pub fn start_with(
+        paths: Paths,
+        notifier: Notifier,
+        power: Arc<dyn Power>,
+    ) -> Result<Self, StartError> {
         create_private_dir(&paths.data_dir)?;
         let lock = File::create(paths.lock_file())?;
         match lock.try_lock() {
@@ -90,7 +101,14 @@ impl CoreHandle {
         let (commands, commands_rx) = mpsc::unbounded_channel();
         let (internal_tx, internal_rx) = mpsc::unbounded_channel();
 
-        let mut engine = Engine::new(paths, commands_rx, internal_tx, internal_rx, notifier);
+        let mut engine = Engine::new(
+            paths,
+            commands_rx,
+            internal_tx,
+            internal_rx,
+            notifier,
+            power,
+        );
         engine.boot();
         let shared = Arc::clone(&engine.shared);
 
@@ -160,6 +178,7 @@ impl Drop for CoreHandle {
 enum Internal {
     Exited(Exited),
     ScheduleFinished(schedules::Finished),
+    Slept(computer::Slept),
     Webhook(notify::Outcome),
 }
 
@@ -247,6 +266,7 @@ struct Engine {
     /// Writes application and schedule output to files (if enabled at startup).
     log_files: Option<(LogWriter, LogWriterThread)>,
     schedules: schedules::State,
+    computer: computer::State,
     monitoring: monitoring::State,
     notify: notify::State,
     /// Startup has finished; schedules planned from now on do not catch up missed runs.
@@ -260,6 +280,7 @@ impl Engine {
         internal_tx: mpsc::UnboundedSender<Internal>,
         internal_rx: mpsc::UnboundedReceiver<Internal>,
         notifier: Notifier,
+        power: Arc<dyn Power>,
     ) -> Self {
         let started_at = SystemTime::now();
         let shared = Arc::new(Shared {
@@ -272,6 +293,7 @@ impl Engine {
                 boot_time: None,
                 apps: Vec::new(),
                 schedules: Vec::new(),
+                pending_power: None,
                 metrics: Default::default(),
                 events: Vec::new(),
                 history_available: false,
@@ -299,6 +321,7 @@ impl Engine {
             store: None,
             log_files: None,
             schedules: schedules::State::default(),
+            computer: computer::State::new(power),
             monitoring: monitoring::State::default(),
             notify: notify::State::default(),
             booted: false,
@@ -372,10 +395,14 @@ impl Engine {
         self.start_notifications();
         loop {
             self.arm_wake();
-            let deadline = [self.next_deadline(), self.schedule_deadline()]
-                .into_iter()
-                .flatten()
-                .min();
+            let deadline = [
+                self.next_deadline(),
+                self.schedule_deadline(),
+                self.computer.deadline(),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             tokio::select! {
                 command = self.commands.recv() => match command {
                     Some(Command::Shutdown) | None => break,
@@ -384,6 +411,7 @@ impl Engine {
                 Some(message) = self.internal_rx.recv() => self.on_internal(message),
                 Some(sample) = self.monitoring.recv() => self.on_sample(sample),
                 () = sleep_until(deadline) => {
+                    self.on_shutdown_timer();
                     self.on_timers();
                     self.on_schedule_timers();
                 }
@@ -404,6 +432,7 @@ impl Engine {
         match message {
             Internal::Exited(exited) => self.on_exited(exited),
             Internal::ScheduleFinished(finished) => self.on_schedule_finished(finished),
+            Internal::Slept(slept) => self.on_slept(slept),
             Internal::Webhook(outcome) => self.on_webhook_outcome(outcome),
         }
     }
@@ -487,6 +516,7 @@ impl Engine {
                 self.save_config(config);
             }
             Command::RunSchedule(id) => self.run_schedule_now(&id),
+            Command::CancelPower => self.cancel_shutdown(),
             Command::SaveWebhook(spec) => {
                 let mut config = self.config.clone();
                 match config.webhooks.iter_mut().find(|w| w.id == spec.id) {
@@ -761,7 +791,8 @@ impl Engine {
             (false, _, ExitKind::Signal(sig)) => ExitReason::Signaled(sig),
             (false, _, ExitKind::Unknown) => ExitReason::Unknown,
         };
-        let crash_hint = !end.requested && end.kind.looks_like_crash();
+        let closed_by_os = self.computer.under_way().filter(|_| !end.requested);
+        let crash_hint = !end.requested && closed_by_os.is_none() && end.kind.looks_like_crash();
         app.note(&reason.to_string());
         app.last_exit = Some(ExitInfo {
             reason: reason.clone(),
@@ -799,6 +830,23 @@ impl Engine {
             RestartMode::Always => true,
             RestartMode::OnFailure => during_startup || !end.kind.is_success(),
         };
+        if let Some(operation) = closed_by_os {
+            // Not a failure. Should the computer stay up after all, it starts again.
+            let app = self.apps.get_mut(&id).expect("exists");
+            if wants_restart && !paused {
+                app.set_state(AppState::Backoff);
+                app.next_attempt = Some(Instant::now());
+            } else {
+                app.set_state(AppState::Stopped);
+            }
+            self.emit(
+                EventLevel::Info,
+                EventKind::AppStopped,
+                Some(&id),
+                format!("{reason} as the computer {}", operation.verb_s()),
+            );
+            return;
+        }
         let mut message = format!("{reason} after {}", format_duration(ran_for));
         if during_startup {
             message.push_str(" (during startup)");
@@ -884,10 +932,12 @@ impl Engine {
     }
 
     fn next_deadline(&self) -> Option<Instant> {
+        let held = self.computer.holds_starts();
         let head = self.waiting_head();
         self.apps
             .iter()
             .filter_map(|(id, app)| match app.state {
+                AppState::Waiting | AppState::Backoff if held => None,
                 AppState::Waiting if Some(id) == head => app.next_attempt,
                 AppState::Waiting => None,
                 AppState::Backoff => app.next_attempt,
@@ -902,9 +952,10 @@ impl Engine {
 
     fn on_timers(&mut self) {
         let now = Instant::now();
+        let held = self.computer.holds_starts();
         let mut due = Vec::new();
         // Automatic starts in order: each one waits for those above it.
-        while let Some(head) = self.waiting_head().cloned() {
+        while !held && let Some(head) = self.waiting_head().cloned() {
             if !self.apps[&head].next_attempt.is_some_and(|t| t <= now) {
                 break;
             }
@@ -915,7 +966,7 @@ impl Engine {
         }
         for (id, app) in &mut self.apps {
             match app.state {
-                AppState::Backoff if app.next_attempt.is_some_and(|t| t <= now) => {
+                AppState::Backoff if !held && app.next_attempt.is_some_and(|t| t <= now) => {
                     due.push(id.clone());
                 }
                 AppState::Starting => {
@@ -1038,6 +1089,7 @@ impl Engine {
             boot_time: self.boot_time,
             apps,
             schedules: self.schedule_statuses(),
+            pending_power: self.computer.pending_power(),
             metrics: self.monitoring.metrics(),
             events: self.events.iter().cloned().collect(),
             history_available: self.store.is_some(),

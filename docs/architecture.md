@@ -10,6 +10,7 @@ gravekeeper (bin: CLI → GUI | --headless | service install/uninstall/status)
 gravekeeper-core (lib: no GUI dependency)
     ├─ engine         Engine thread (Tokio current-thread runtime): state machine, timers, commands
     │  ├─ schedules   running scheduled tasks
+    │  ├─ computer    restarting, shutting down and sleeping the computer for a schedule
     │  ├─ monitoring  samples → per-app usage, chart history, threshold alerts
     │  └─ notify      events → webhook deliveries
     ├─ supervisor     Restart decisions (pure) — RestartTracker
@@ -20,6 +21,7 @@ gravekeeper-core (lib: no GUI dependency)
     ├─ config         TOML schema, validation, atomic save, migrations, Secret
     ├─ store          SQLite event history and schedule run/plan times on a writer thread
     ├─ logfile        Rotating files, log writer thread, config backups
+    ├─ power          Asking the OS to restart, shut down or sleep (`Power`, replaced in tests)
     ├─ process        Spawn, stop, process-tree termination, stdout/stderr capture (LogBuffer)
     └─ paths          Per-user locations ($GRAVEKEEPER_HOME override)
 ```
@@ -107,6 +109,12 @@ Every change (`SaveApp`, `MoveApp`, `SaveSchedule`, `SaveWebhook`, `SaveMonitori
 Planning (`schedule::plan`, `schedule::next_after`) is pure calendar arithmetic with jiff and is unit-tested for DST gaps and folds, missed runs, and after-boot behavior. The engine keeps each schedule's next run as a wall-clock time. Because Tokio timers run on the monotonic clock, which does not advance during sleep on every OS, the engine wakes at least every 30 seconds to compare against the wall clock; a run found more than 2 minutes late is handled as missed. The last run time is persisted (`schedule_runs` table) so missed runs and intervals survive restarts.
 
 `run` actions execute like applications (own process group / Job Object, output captured to a per-schedule buffer and log file) under a time limit, after which the tree is stopped. `start` / `stop` / `restart` actions go through the same code as the GUI buttons.
+
+**Restarting, shutting down and sleeping the computer** (`engine::computer`) goes through the `Power` trait, so that tests never do it to the machine they run on. Sleep is a call on a thread of its own, since it may return only after the computer has woken up; its outcome is reported then, and the wake timer is armed first. For restarts and shutdowns the OS does the counting down (`InitiateShutdownW` with a grace period), not the engine, so it goes ahead even if Gravekeeper exits. What is left to the engine:
+
+- *No restart loops.* Such schedules may only have a time of day and skip missed runs, and scheduled runs are refused until the computer has been up for 10 minutes. That is longer than the 2 minutes after which a run counts as missed, so even if the last run time was not saved, the run that caused a restart cannot cause another.
+- *Supervision pauses.* From the moment the OS accepts, applications in `Waiting` or `Backoff` are held. Once the countdown is over, exits are taken to be the OS closing them: recorded as `app_stopped`, so a nightly restart does not send alerts. Applications are not stopped beforehand, because on Windows that would kill them without notice.
+- *Checking that it happened.* Being accepted is not a guarantee, as Microsoft documents. If the engine is still running 3 minutes after the restart or shutdown was due, it releases the held applications and tries again, up to 3 times in all. Refusals are retried the same way, unless the account lacks the privilege.
 
 ## Monitoring and alerts
 

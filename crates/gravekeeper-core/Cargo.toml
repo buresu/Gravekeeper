@@ -30,13 +30,16 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # Same version process-wrap uses; for the CREATE_NO_WINDOW flag and the children's error mode,
-# and the timer that wakes the computer for a schedule.
+# the timer that wakes the computer for a schedule, and restarting, shutting down or
+# sleeping the computer.
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Power",
+    "Win32_System_Shutdown",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]

@@ -10,6 +10,7 @@ mod engine;
 pub mod logfile;
 pub mod monitor;
 pub mod paths;
+pub mod power;
 pub mod process;
 pub mod schedule;
 mod store;

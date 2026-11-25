@@ -14,6 +14,7 @@ use jiff::{Timestamp, ZonedDateTime};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{AppId, secs};
+use crate::power::Operation;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -141,6 +142,21 @@ pub enum Action {
         #[serde(default = "default_run_timeout", with = "secs")]
         timeout: Duration,
     },
+    // Where the OS allows it (see [`crate::power`]). These have no fields, but braces, so that
+    // unknown ones in the file are reported like elsewhere.
+    RestartComputer {},
+    ShutDownComputer {},
+    SleepComputer {},
+}
+
+impl From<Operation> for Action {
+    fn from(operation: Operation) -> Self {
+        match operation {
+            Operation::Restart => Self::RestartComputer {},
+            Operation::ShutDown => Self::ShutDownComputer {},
+            Operation::Sleep => Self::SleepComputer {},
+        }
+    }
 }
 
 impl Action {
@@ -148,7 +164,22 @@ impl Action {
     pub fn app(&self) -> Option<&AppId> {
         match self {
             Self::Start { app } | Self::Stop { app } | Self::Restart { app } => Some(app),
-            Self::Run { .. } => None,
+            Self::Run { .. }
+            | Self::RestartComputer {}
+            | Self::ShutDownComputer {}
+            | Self::SleepComputer {} => None,
+        }
+    }
+
+    /// What this action does to the computer itself, if anything.
+    pub fn operation(&self) -> Option<Operation> {
+        match self {
+            Self::RestartComputer {} => Some(Operation::Restart),
+            Self::ShutDownComputer {} => Some(Operation::ShutDown),
+            Self::SleepComputer {} => Some(Operation::Sleep),
+            Self::Start { .. } | Self::Stop { .. } | Self::Restart { .. } | Self::Run { .. } => {
+                None
+            }
         }
     }
 }
@@ -330,6 +361,17 @@ pub fn validate(spec: &ScheduleSpec) -> Vec<String> {
         }
         if timeout.is_zero() {
             errors.push("timeout must be at least 1 second".into());
+        }
+    }
+    if let Some(operation) = spec.action.operation() {
+        let what = operation.describe();
+        // Anything relative to the boot or to a missed run could take the computer down again
+        // as soon as it is back.
+        if matches!(spec.when, When::Interval { .. } | When::AfterBoot { .. }) {
+            errors.push(format!("to {what}, run once, daily or weekly"));
+        }
+        if spec.missed == MissedRun::RunOnce {
+            errors.push(format!("to {what}, missed runs must be skipped"));
         }
     }
     errors
@@ -648,6 +690,47 @@ mod tests {
             Action::Run { timeout, .. } => assert_eq!(*timeout, default_run_timeout()),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn computer_operations_need_a_time_of_day() {
+        let parse = |text: &str| {
+            toml::from_str::<ScheduleSpec>(&format!("id = \"r\"\nname = \"Restart\"\n{text}"))
+        };
+        let spec = parse(
+            "when = { kind = \"daily\", time = \"03:00\" }\naction = { kind = \"restart-computer\" }",
+        )
+        .unwrap();
+        assert_eq!(spec.action, Action::RestartComputer {});
+        assert!(validate(&spec).is_empty());
+
+        let looping = parse(
+            "when = { kind = \"after-boot\", delay = 60 }\naction = { kind = \"restart-computer\" }\nmissed = \"run-once\"",
+        )
+        .unwrap();
+        assert_eq!(validate(&looping).len(), 2);
+        for operation in [Operation::Restart, Operation::ShutDown, Operation::Sleep] {
+            let spec = ScheduleSpec {
+                action: operation.into(),
+                ..looping.clone()
+            };
+            assert_eq!(spec.action.operation(), Some(operation));
+            assert_eq!(validate(&spec).len(), 2);
+        }
+        for kind in ["shut-down-computer", "sleep-computer"] {
+            let spec = parse(&format!(
+                "when = {{ kind = \"daily\", time = \"03:00\" }}\naction = {{ kind = \"{kind}\" }}"
+            ));
+            assert!(spec.unwrap().action.operation().is_some(), "{kind}");
+        }
+
+        // Unknown fields are reported, not ignored.
+        assert!(
+            parse(
+                "when = { kind = \"daily\", time = \"03:00\" }\naction = { kind = \"restart-computer\", force = false }",
+            )
+            .is_err()
+        );
     }
 
     #[test]
